@@ -1,0 +1,12 @@
+{
+  "id": "local-whisper-diarization-v1",
+  "whisperBinary": "/absolute/path/whisper-cli",
+  "diarizeBinary": "/absolute/path/sherpa-onnx-offline-speaker-diarization",
+  "whisperModel": "/absolute/path/ggml-large-v3-q5_0.bin",
+  "vadModel": "/absolute/path/ggml-silero-v5.1.2.bin",
+  "segmentationModel": "/absolute/path/sherpa-onnx-pyannote-segmentation-3-0.onnx",
+  "embeddingModel": "/absolute/path/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+  "sttThreads": 4,
+  "diarizeThreads": 4,
+  "parallel": true
+}

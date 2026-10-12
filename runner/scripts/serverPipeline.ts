@@ -1,0 +1,246 @@
+import { spawn, type ChildProcess } from 'node:child_process'
+import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { assignSpeakers, mergeUtterances } from '@meeting-stt/core/merge'
+import { buildDiarizeArgs, parseDiarizeOutput } from '../src/main/pipeline/diarize'
+import { normalizeWavFile } from '../src/main/pipeline/normalize'
+import { buildWhisperArgs, parseWhisperOutput } from '../src/main/pipeline/whisper'
+
+export interface ServerManifest {
+  schemaVersion: 1
+  audioPath: string
+  outputDirectory: string
+  speakerCount?: number
+  timeoutMs: number
+  profile: {
+    id: string
+    whisperBinary: string
+    diarizeBinary: string
+    whisperModel: string
+    vadModel: string
+    segmentationModel: string
+    embeddingModel: string
+    sttThreads: number
+    diarizeThreads: number
+    parallel: boolean
+  }
+}
+
+const positiveInteger = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && Number(value) > 0
+
+export const validateManifest = (value: unknown): ServerManifest => {
+  const manifest = value as ServerManifest
+  if (
+    !manifest ||
+    manifest.schemaVersion !== 1 ||
+    !manifest.profile ||
+    !positiveInteger(manifest.timeoutMs) ||
+    (manifest.speakerCount !== undefined && !positiveInteger(manifest.speakerCount)) ||
+    !positiveInteger(manifest.profile.sttThreads) ||
+    !positiveInteger(manifest.profile.diarizeThreads) ||
+    typeof manifest.profile.parallel !== 'boolean' ||
+    typeof manifest.profile.id !== 'string' ||
+    !manifest.profile.id.trim()
+  )
+    throw new Error('INVALID_MANIFEST')
+  const paths = [
+    manifest.audioPath,
+    manifest.outputDirectory,
+    manifest.profile.whisperBinary,
+    manifest.profile.diarizeBinary,
+    manifest.profile.whisperModel,
+    manifest.profile.vadModel,
+    manifest.profile.segmentationModel,
+    manifest.profile.embeddingModel
+  ]
+  if (paths.some((item) => typeof item !== 'string' || !path.isAbsolute(item))) {
+    throw new Error('INVALID_MANIFEST')
+  }
+  if (path.dirname(manifest.audioPath) !== manifest.outputDirectory)
+    throw new Error('INVALID_MANIFEST')
+  return manifest
+}
+
+export const assembleResult = (raw: Buffer, diarization: string, speakerCount?: number) => {
+  const segments = parseWhisperOutput(raw)
+  const speakerSegments = parseDiarizeOutput(diarization)
+  if (segments.some((item) => item.text.trim()) && !speakerSegments.length) {
+    throw new Error('DIARIZATION_EMPTY')
+  }
+  const utterances = mergeUtterances(
+    assignSpeakers({
+      segments,
+      speakerSegments,
+      isMinorSpeakerAbsorbed: !speakerCount
+    })
+  )
+  if (
+    utterances.some(
+      (item, index) =>
+        item.ord !== index ||
+        !Number.isFinite(item.startSec) ||
+        !Number.isFinite(item.endSec) ||
+        item.startSec < 0 ||
+        item.endSec < item.startSec ||
+        typeof item.text !== 'string' ||
+        typeof item.speakerLabel !== 'string'
+    )
+  ) {
+    throw new Error('INVALID_RESULT')
+  }
+  return { schemaVersion: 1 as const, rawWhisperJson: raw.toString('utf8'), utterances }
+}
+
+/** No native output reaches logs: diarization stdout is only parsed in memory. */
+export const runServerPipeline = async (manifest: ServerManifest) => {
+  const children = new Set<ChildProcess>()
+  let aborted = false
+  let abortCode = 'CANCELLED'
+  const stop = (code: string) => {
+    aborted = true
+    abortCode = code
+    for (const child of children) {
+      child.kill('SIGTERM')
+      const escalation = setTimeout(() => child.kill('SIGKILL'), 750)
+      escalation.unref()
+      child.once('close', () => clearTimeout(escalation))
+    }
+  }
+  const signal = () => stop('CANCELLED')
+  process.on('SIGTERM', signal)
+  process.on('SIGINT', signal)
+  const timer = setTimeout(() => stop('INFERENCE_TIMEOUT'), manifest.timeoutMs)
+  const run = (
+    command: string,
+    args: string[],
+    capture: boolean,
+    failureCode: 'STT_FAILED' | 'DIARIZATION_FAILED'
+  ) =>
+    new Promise<string>((resolve, reject) => {
+      if (aborted) {
+        reject(new Error(abortCode))
+        return
+      }
+      const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'], shell: false })
+      children.add(child)
+      const chunks: Buffer[] = []
+      let size = 0
+      child.stdout?.on('data', (chunk: Buffer) => {
+        if (!capture) return
+        size += chunk.length
+        if (size > 32 * 1024 * 1024) {
+          stop('OUTPUT_LIMIT')
+          return
+        }
+        chunks.push(chunk)
+      })
+      child.once('error', () => {
+        children.delete(child)
+        stop(failureCode)
+        reject(new Error(failureCode))
+      })
+      child.once('close', (code) => {
+        children.delete(child)
+        if (aborted || code !== 0) {
+          const failure = aborted ? abortCode : failureCode
+          stop(failure)
+          reject(new Error(failure))
+        } else resolve(Buffer.concat(chunks).toString('utf8'))
+      })
+    })
+  try {
+    await Promise.all(
+      [
+        manifest.audioPath,
+        ...[
+          manifest.profile.whisperBinary,
+          manifest.profile.diarizeBinary,
+          manifest.profile.whisperModel,
+          manifest.profile.vadModel,
+          manifest.profile.segmentationModel,
+          manifest.profile.embeddingModel
+        ]
+      ].map((file) => access(file))
+    )
+    await mkdir(manifest.outputDirectory, { recursive: true })
+    const prefix = path.join(manifest.outputDirectory, 'whisper')
+    const normalized = path.join(manifest.outputDirectory, 'normalized.wav')
+    await rm(path.join(manifest.outputDirectory, 'result.json'), { force: true })
+    await normalizeWavFile({ inputPath: manifest.audioPath, outputPath: normalized })
+    if (aborted) throw new Error(abortCode)
+    const p = manifest.profile
+    const stt = () =>
+      run(
+        p.whisperBinary,
+        buildWhisperArgs({
+          modelPath: p.whisperModel,
+          audioPath: normalized,
+          outputPath: prefix,
+          threads: p.sttThreads,
+          vadModelPath: p.vadModel
+        }),
+        false,
+        'STT_FAILED'
+      )
+    const diarize = () =>
+      run(
+        p.diarizeBinary,
+        buildDiarizeArgs({
+          segmentationModelPath: p.segmentationModel,
+          embeddingModelPath: p.embeddingModel,
+          audioPath: normalized,
+          threads: p.diarizeThreads,
+          speakerCount: manifest.speakerCount
+        }),
+        true,
+        'DIARIZATION_FAILED'
+      )
+    let diarization: string
+    if (p.parallel) [, diarization] = await Promise.all([stt(), diarize()])
+    else {
+      await stt()
+      diarization = await diarize()
+    }
+    const result = assembleResult(
+      await readFile(`${prefix}.json`),
+      diarization,
+      manifest.speakerCount
+    )
+    if (aborted) throw new Error(abortCode)
+    const temporary = path.join(manifest.outputDirectory, 'result.json.tmp')
+    await writeFile(temporary, JSON.stringify(result), { encoding: 'utf8', mode: 0o600 })
+    await rename(temporary, path.join(manifest.outputDirectory, 'result.json'))
+  } finally {
+    clearTimeout(timer)
+    process.off('SIGTERM', signal)
+    process.off('SIGINT', signal)
+    for (const child of children) child.kill('SIGKILL')
+  }
+}
+
+const main = async () => {
+  const args = process.argv.slice(2)
+  if (args.length !== 2 || args[0] !== '--manifest') throw new Error('INVALID_ARGUMENTS')
+  const manifest = validateManifest(JSON.parse(await readFile(args[1], 'utf8')))
+  try {
+    await runServerPipeline(manifest)
+  } catch (error) {
+    const code =
+      error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'RUNNER_FAILED'
+    await writeFile(
+      path.join(manifest.outputDirectory, 'diagnostic.json'),
+      JSON.stringify({ code }),
+      { mode: 0o600 }
+    )
+    throw new Error(code)
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(() => {
+    process.stderr.write('RUNNER_FAILED\n')
+    process.exitCode = 1
+  })
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@knot/ai-server-runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "tsx scripts/serverPipeline.ts",
+    "typecheck": "tsc --noEmit",
+    "test:node": "tsx --test scripts/serverPipeline.test.ts",
+    "test:python": "python3 scripts/serverSupervisor.test.py",
+    "test": "pnpm run test:node && pnpm run test:python"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "tsx": "4.23.12",
+    "typescript": "5.9.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

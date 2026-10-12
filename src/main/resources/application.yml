@@ -1,0 +1,27 @@
+server:
+  address: 127.0.0.1
+  port: ${AI_PORT:18765}
+  tomcat:
+    max-http-form-post-size: 64KB
+ai:
+  token: ${AI_APP_TOKEN}
+  work-directory: ${AI_WORK_DIRECTORY}
+  profile-file: ${AI_PROFILE_FILE}
+  desktop-directory: ${AI_DESKTOP_DIRECTORY}
+  allowed-s3-hosts: ${AI_ALLOWED_S3_HOSTS}
+  bucket: ${AI_S3_BUCKET}
+  key-prefix: ${AI_S3_KEY_PREFIX}
+  connect-timeout: ${AI_CONNECT_TIMEOUT:10s}
+  read-timeout: ${AI_READ_TIMEOUT:30s}
+  download-timeout: ${AI_DOWNLOAD_TIMEOUT:15m}
+  conversion-timeout: ${AI_CONVERSION_TIMEOUT:15m}
+  inference-timeout: ${AI_INFERENCE_TIMEOUT:12h}
+  result-retention: ${AI_RESULT_RETENTION:1h}
+  request-validity-limit: ${AI_REQUEST_VALIDITY_LIMIT:24h}
+  maximum-bytes: 524288000
+  maximum-result-bytes: 268435456
+  maximum-records: 1024
+  python: ${AI_PYTHON:python3}
+  pnpm: ${AI_PNPM:pnpm}
+  ffmpeg: ${AI_FFMPEG:ffmpeg}
+  ffprobe: ${AI_FFPROBE:ffprobe}
