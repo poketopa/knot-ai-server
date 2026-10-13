@@ -11,22 +11,12 @@ public class TestFixtures {
                 directory.resolve("profile.json"),
                 directory,
                 Set.of("test-bucket.s3.ap-northeast-2.amazonaws.com"),
-                "test-bucket",
-                "recordings/",
-                Duration.ofSeconds(1),
-                Duration.ofSeconds(1),
                 Duration.ofSeconds(2),
                 Duration.ofSeconds(2),
                 Duration.ofSeconds(2),
-                Duration.ofMinutes(1),
-                Duration.ofHours(1),
-                524288000,
-                268435456,
-                1024,
                 "python3",
                 "pnpm",
-                "ffmpeg",
-                "ffprobe"
+                "ffmpeg"
         );
     }
 }

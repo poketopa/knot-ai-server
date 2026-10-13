@@ -16,24 +16,6 @@ class AudioInspector {
     private static final int FORMAT_CHUNK_ID = 0x666d7420;
     private static final int DATA_CHUNK_ID = 0x64617461;
 
-    void verifyContainerDuration(Path durationFile) throws IOException {
-        String probeDuration = Files.readString(durationFile)
-                .trim();
-        if (probeDuration.equals("N/A")) {
-            return;
-        }
-        double declaredDuration;
-        try {
-            declaredDuration = Double.parseDouble(probeDuration);
-        } catch (NumberFormatException exception) {
-            throw new JobException(JobErrorCode.INVALID_AUDIO_DURATION);
-        }
-        if (!Double.isFinite(declaredDuration) || declaredDuration <= 0
-                || declaredDuration > MAXIMUM_DURATION_SECONDS) {
-            throw new JobException(JobErrorCode.AUDIO_DURATION_EXCEEDED);
-        }
-    }
-
     double readPcmDuration(Path wav) throws IOException {
         if (Files.size(wav) > MAXIMUM_PCM_BYTES + WAV_HEADER_ALLOWANCE_BYTES) {
             throw new JobException(JobErrorCode.AUDIO_DURATION_EXCEEDED);

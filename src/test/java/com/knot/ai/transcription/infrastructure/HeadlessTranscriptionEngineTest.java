@@ -6,7 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.knot.ai.global.AiServerProperties;
-import com.knot.ai.transcription.application.dto.command.CreateJobCommand;
+import com.knot.ai.transcription.application.TranscriptionRequest;
 import com.knot.ai.transcription.domain.JobException;
 import com.knot.ai.transcription.domain.TranscriptResult;
 import com.sun.net.httpserver.HttpServer;
@@ -17,7 +17,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -33,12 +32,12 @@ class HeadlessTranscriptionEngineTest {
     Path directory;
     private HttpServer server;
     private HeadlessTranscriptionEngine engine;
-    private Path probe;
+    private Path ffmpeg;
     private Path pnpm;
     @BeforeEach
     void prepare() throws Exception {
-        Path desktop = directory.resolve("desktop");
-        Path scripts = desktop.resolve("scripts");
+        Path runner = directory.resolve("runner");
+        Path scripts = runner.resolve("scripts");
         Files.createDirectories(scripts);
         Files.copy(
                 Path.of("runner/scripts/serverSupervisor.py"),
@@ -48,11 +47,7 @@ class HeadlessTranscriptionEngineTest {
                 "asset",
                 "import sys\n"
         );
-        probe = script(
-                "probe",
-                "import sys,pathlib\npathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('1')\n"
-        );
-        Path ffmpeg = script(
+        ffmpeg = script(
                 "ffmpeg",
                 "import sys,wave\nw=wave.open(sys.argv[-1],'wb')\nw.setnchannels(1)\n"
                         + "w.setsampwidth(2)\nw.setframerate(16000)\nw.writeframes(bytes(32000))\nw.close()\n"
@@ -71,8 +66,6 @@ class HeadlessTranscriptionEngineTest {
         mapper.writeValue(
                 profile.toFile(),
                 Map.of(
-                        "id",
-                        "profile",
                         "whisperBinary",
                         asset.toString(),
                         "diarizeBinary",
@@ -88,9 +81,7 @@ class HeadlessTranscriptionEngineTest {
                         "sttThreads",
                         1,
                         "diarizeThreads",
-                        1,
-                        "parallel",
-                        false
+                        1
                 )
         );
         server = HttpServer.create(
@@ -127,24 +118,14 @@ class HeadlessTranscriptionEngineTest {
                 "token",
                 directory.resolve("jobs"),
                 profile,
-                desktop,
+                runner,
                 Set.of("test-bucket.s3.ap-northeast-2.amazonaws.com"),
-                "test-bucket",
-                "recordings/",
-                Duration.ofSeconds(1),
-                Duration.ofSeconds(1),
                 Duration.ofSeconds(2),
                 Duration.ofSeconds(5),
                 Duration.ofSeconds(5),
-                Duration.ofMinutes(1),
-                Duration.ofHours(1),
-                524288000,
-                268435456,
-                1024,
                 "python3",
                 pnpm.toString(),
-                ffmpeg.toString(),
-                probe.toString()
+                ffmpeg.toString()
         );
         S3AudioDownloader downloader = new S3AudioDownloader(
                 properties,
@@ -171,7 +152,7 @@ class HeadlessTranscriptionEngineTest {
     @DisplayName("감독 프로세스로 변환과 runner를 실행하고 완성 결과만 공개한다")
     void transcribe_success_supervisedPipeline() throws Exception {
         // given
-        CreateJobCommand command = command();
+        TranscriptionRequest command = command();
         // when
         TranscriptResult result = engine.transcribe(command);
         // then
@@ -194,29 +175,6 @@ class HeadlessTranscriptionEngineTest {
     }
 
     @Test
-    @DisplayName("2시간을 초과한 파일은 추론 전에 거부한다")
-    void transcribe_failure_durationExceeded() throws Exception {
-        // given
-        Files.writeString(
-                probe,
-                "#!/usr/bin/env python3\nimport sys,pathlib\n"
-                        + "pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('7200.1')\n"
-        );
-        CreateJobCommand command = command();
-        // when
-        JobException exception = assertThrows(
-                JobException.class,
-                () -> engine.transcribe(command)
-        );
-        // then
-        assertEquals(
-                "AUDIO_DURATION_EXCEEDED",
-                exception.getCode()
-        );
-        engine.cleanup(command.attemptId());
-    }
-
-    @Test
     @DisplayName("runner가 원본만 출력하면 작업 성공으로 처리하지 않는다")
     void transcribe_failure_rawOnly() throws Exception {
         // given
@@ -227,7 +185,7 @@ class HeadlessTranscriptionEngineTest {
                         + "(pathlib.Path(m['outputDirectory'])/'result.json').write_text('{\\\"schemaVersion\\\":1,"
                         + "\\\"rawWhisperJson\\\":\\\"{}\\\",\\\"utterances\\\":[]}')\n"
         );
-        CreateJobCommand command = command();
+        TranscriptionRequest command = command();
         // when
         Exception exception = assertThrows(
                 Exception.class,
@@ -239,36 +197,14 @@ class HeadlessTranscriptionEngineTest {
     }
 
     @Test
-    @DisplayName("길이 정보 없는 MediaRecorder WebM은 디코딩된 PCM 길이로 검증한다")
-    void transcribe_success_missingContainerDuration() throws Exception {
-        // given
-        Files.writeString(
-                probe,
-                "#!/usr/bin/env python3\nimport sys,pathlib\n"
-                        + "pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('N/A')\n"
-        );
-        CreateJobCommand command = command();
-        // when
-        TranscriptResult result = engine.transcribe(command);
-        // then
-        assertEquals(
-                "안녕",
-                result.utterances()
-                        .getFirst()
-                        .text()
-        );
-        engine.cleanup(command.attemptId());
-    }
-
-    @Test
     @DisplayName("디코딩 실행 제한 시간이 지나면 단계별 timeout을 반환한다")
     void transcribe_failure_decodeTimeout() throws Exception {
         // given
         Files.writeString(
-                probe,
+                ffmpeg,
                 "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n"
         );
-        CreateJobCommand command = command();
+        TranscriptionRequest command = command();
         // when
         JobException exception = assertThrows(
                 JobException.class,
@@ -283,14 +219,9 @@ class HeadlessTranscriptionEngineTest {
     }
 
     @Test
-    @DisplayName("컨테이너 길이가 없어도 실제 PCM이 2시간을 넘으면 거부한다")
+    @DisplayName("실제 PCM이 2시간을 넘으면 추론 전에 거부한다")
     void transcribe_failure_decodedDurationExceeded() throws Exception {
         // given
-        Files.writeString(
-                probe,
-                "#!/usr/bin/env python3\nimport sys,pathlib\n"
-                        + "pathlib.Path(sys.argv[sys.argv.index('-o')+1]).write_text('N/A')\n"
-        );
         Path decoder = directory.resolve("ffmpeg");
         Files.writeString(
                 decoder,
@@ -298,7 +229,7 @@ class HeadlessTranscriptionEngineTest {
                         + "f.write(struct.pack('<4sI4s4sIHHIIHH4sI',b'RIFF',size+36,b'WAVE',b'fmt ',"
                         + "16,1,1,16000,32000,2,16,b'data',size))\nf.seek(size+43)\nf.write(bytes(1))\nf.close()\n"
         );
-        CreateJobCommand command = command();
+        TranscriptionRequest command = command();
         // when
         JobException exception = assertThrows(
                 JobException.class,
@@ -317,7 +248,7 @@ class HeadlessTranscriptionEngineTest {
     void transcribe_failure_knownRunnerDiagnostic() throws Exception {
         // given
         diagnosticRunner("STT_FAILED");
-        CreateJobCommand command = command();
+        TranscriptionRequest command = command();
         // when
         JobException exception = assertThrows(
                 JobException.class,
@@ -336,7 +267,7 @@ class HeadlessTranscriptionEngineTest {
     void transcribe_failure_cancelledRunnerDiagnostic() throws Exception {
         // given
         diagnosticRunner("CANCELLED");
-        CreateJobCommand command = command();
+        TranscriptionRequest command = command();
         // when
         JobException exception = assertThrows(
                 JobException.class,
@@ -355,7 +286,7 @@ class HeadlessTranscriptionEngineTest {
     void transcribe_failure_unknownRunnerDiagnostic() throws Exception {
         // given
         diagnosticRunner("SECRET_PATH_LEAK");
-        CreateJobCommand command = command();
+        TranscriptionRequest command = command();
         // when
         JobException exception = assertThrows(
                 JobException.class,
@@ -395,25 +326,10 @@ class HeadlessTranscriptionEngineTest {
         return path;
     }
 
-    private CreateJobCommand command() {
-        return new CreateJobCommand(
+    private TranscriptionRequest command() {
+        return new TranscriptionRequest(
                 UUID.randomUUID(),
-                "profile",
-                Instant.now()
-                        .plusSeconds(1800),
-                new CreateJobCommand.AudioInput(
-                        "test-bucket",
-                        "recordings/audio.webm",
-                        null,
-                        "\"fixed\"",
-                        "https://test-bucket.s3.ap-northeast-2.amazonaws.com/recordings/audio.webm",
-                        Map.of(
-                                "If-Match",
-                                "\"fixed\""
-                        ),
-                        3,
-                        "audio/webm"
-                ),
+                "https://test-bucket.s3.ap-northeast-2.amazonaws.com/recordings/audio.webm",
                 null
         );
     }

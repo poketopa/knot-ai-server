@@ -1,13 +1,17 @@
-package com.knot.ai.transcription.application.dto.result;
+package com.knot.ai.transcription.application;
 
-import com.knot.ai.transcription.domain.JobStatus;
 import com.knot.ai.transcription.domain.TranscriptResult;
 import java.util.UUID;
 
 public record JobSnapshot(
         UUID attemptId,
-        JobStatus status,
+        Status status,
         String failureCode,
         TranscriptResult result
 ) {
+    public enum Status {
+        PROCESSING,
+        SUCCEEDED,
+        FAILED
+    }
 }

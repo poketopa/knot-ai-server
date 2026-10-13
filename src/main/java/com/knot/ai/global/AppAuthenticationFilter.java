@@ -1,6 +1,5 @@
 package com.knot.ai.global;
 
-import com.knot.ai.global.exception.CommonErrorCode;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -30,16 +29,10 @@ public class AppAuthenticationFilter extends OncePerRequestFilter {
                 expected,
                 authorization.getBytes(StandardCharsets.UTF_8)
         )) {
-            CommonErrorCode errorCode = CommonErrorCode.UNAUTHORIZED;
-            response.setStatus(errorCode.getStatus());
+            response.setStatus(401);
             response.setContentType("application/json;charset=UTF-8");
             response.getWriter()
-                    .write(
-                            "{\"code\":\"%s\",\"message\":\"%s\"}".formatted(
-                                    errorCode.getCode(),
-                                    errorCode.getMessage()
-                            )
-                    );
+                    .write("{\"code\":\"UNAUTHORIZED\",\"message\":\"앱 인증이 필요합니다\"}");
             return;
         }
         chain.doFilter(

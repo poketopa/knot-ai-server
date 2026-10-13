@@ -20,10 +20,10 @@ import com.knot.ai.TestFixtures;
 import com.knot.ai.global.AppAuthenticationFilter;
 import com.knot.ai.global.GlobalExceptionHandler;
 import com.knot.ai.transcription.application.TranscriptionJobService;
-import com.knot.ai.transcription.application.dto.result.JobSnapshot;
+import com.knot.ai.transcription.application.TranscriptionRequest;
+import com.knot.ai.transcription.application.JobSnapshot;
 import com.knot.ai.transcription.domain.JobErrorCode;
 import com.knot.ai.transcription.domain.JobException;
-import com.knot.ai.transcription.domain.JobStatus;
 import com.knot.ai.transcription.domain.TranscriptResult;
 import java.nio.file.Path;
 import java.util.List;
@@ -67,11 +67,10 @@ class TranscriptionJobControllerTest {
     }
 
     @Test
-    @DisplayName("인증된 health 응답은 실제 실행 프로필을 반환한다")
+    @DisplayName("인증된 health 응답은 준비 상태만 반환한다")
     void getHealth_success() throws Exception {
         // given
         when(service.isReady()).thenReturn(true);
-        when(service.getProfileId()).thenReturn("profile");
 
         // when
         ResultActions response = mvc.perform(authorized(get("/health")));
@@ -79,7 +78,35 @@ class TranscriptionJobControllerTest {
         // then
         response.andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("UP"))
-                .andExpect(jsonPath("$.profileId").value("profile"));
+                .andExpect(jsonPath("$.profileId").doesNotExist());
+    }
+
+    @Test
+    @DisplayName("모델 실행 준비가 되지 않으면 health는 503을 반환한다")
+    void getHealth_failure_notReady() throws Exception {
+        // when
+        ResultActions response = mvc.perform(authorized(get("/health")));
+
+        // then
+        response.andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.status").value("DOWN"));
+    }
+
+    @Test
+    @DisplayName("다른 작업이 실행 중이면 대기열 없이 충돌을 반환한다")
+    void create_failure_busy() throws Exception {
+        // given
+        when(service.create(any())).thenThrow(new JobException(JobErrorCode.BUSY));
+
+        // when
+        ResultActions response = mvc.perform(
+                authorized(post("/api/v1/transcription-jobs")).contentType(MediaType.APPLICATION_JSON)
+                        .content(createBody(UUID.randomUUID()))
+        );
+
+        // then
+        response.andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("BUSY"));
     }
 
     @Test
@@ -90,7 +117,7 @@ class TranscriptionJobControllerTest {
         when(service.create(any())).thenReturn(
                 new JobSnapshot(
                         attemptId,
-                        JobStatus.PROCESSING,
+                        JobSnapshot.Status.PROCESSING,
                         null,
                         null
                 )
@@ -114,6 +141,13 @@ class TranscriptionJobControllerTest {
                 .andExpect(jsonPath("$.status").value("PROCESSING"))
                 .andExpect(jsonPath("$.failureCode").value(nullValue()))
                 .andExpect(jsonPath("$.result").value(nullValue()));
+        verify(service).create(
+                new TranscriptionRequest(
+                        attemptId,
+                        "https://audio",
+                        null
+                )
+        );
     }
 
     @Test
@@ -125,7 +159,7 @@ class TranscriptionJobControllerTest {
         when(service.get(attemptId)).thenReturn(
                 new JobSnapshot(
                         attemptId,
-                        JobStatus.SUCCEEDED,
+                        JobSnapshot.Status.SUCCEEDED,
                         null,
                         new TranscriptResult(
                                 1,
@@ -161,8 +195,8 @@ class TranscriptionJobControllerTest {
     }
 
     @Test
-    @DisplayName("삭제 요청은 작업 삭제 후 본문 없이 성공한다")
-    void delete_success_noContent() throws Exception {
+    @DisplayName("삭제 API는 지원하지 않는다")
+    void delete_failure_notSupported() throws Exception {
         // given
         UUID attemptId = UUID.randomUUID();
 
@@ -170,9 +204,8 @@ class TranscriptionJobControllerTest {
         ResultActions response = mvc.perform(authorized(delete("/api/v1/transcription-jobs/" + attemptId)));
 
         // then
-        response.andExpect(status().isNoContent())
-                .andExpect(content().string(""));
-        verify(service).delete(attemptId);
+        response.andExpect(status().isMethodNotAllowed());
+        verifyNoInteractions(service);
     }
 
     @Test
@@ -196,22 +229,24 @@ class TranscriptionJobControllerTest {
     }
 
     @Test
-    @DisplayName("중첩 입력의 contentType 누락은 기본 영어 메시지 없이 거부한다")
-    void create_failure_missingNestedContentType() throws Exception {
+    @DisplayName("화자 수는 양수만 허용한다")
+    void create_failure_invalidSpeakerCount() throws Exception {
         // given
-        UUID attemptId = UUID.randomUUID();
+        String body = """
+                {"attemptId":"%s","downloadUrl":"https://audio","speakerCount":0}
+                """.formatted(UUID.randomUUID());
 
         // when
         ResultActions response = mvc.perform(
                 authorized(post("/api/v1/transcription-jobs")).contentType(MediaType.APPLICATION_JSON)
-                        .content(createBodyWithoutContentType(attemptId))
+                        .content(body)
         );
 
         // then
         response.andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
-                .andExpect(jsonPath("$.fieldErrors[0].field").value("input.contentType"))
-                .andExpect(jsonPath("$.fieldErrors[0].reason").value("타입은 필수입니다"));
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("speakerCount"))
+                .andExpect(jsonPath("$.fieldErrors[0].reason").value("화자 수는 양수여야 합니다"));
         verifyNoInteractions(service);
     }
 
@@ -304,17 +339,7 @@ class TranscriptionJobControllerTest {
 
     private String createBody(UUID attemptId) {
         return """
-                {"attemptId":"%s","profileId":"profile","requestValidUntil":"2026-10-08T01:00:00Z",
-                  "input":{"bucket":"bucket","key":"recordings/a","etag":"etag","downloadUrl":"https://s3",
-                  "contentLength":1,"contentType":"audio/webm"},"speakerCount":null}
-                """.formatted(attemptId);
-    }
-
-    private String createBodyWithoutContentType(UUID attemptId) {
-        return """
-                {"attemptId":"%s","profileId":"profile","requestValidUntil":"2026-10-08T01:00:00Z",
-                  "input":{"bucket":"bucket","key":"recordings/a","etag":"etag","downloadUrl":"https://s3",
-                  "contentLength":1},"speakerCount":null}
+                {"attemptId":"%s","downloadUrl":"https://audio","speakerCount":null}
                 """.formatted(attemptId);
     }
 }

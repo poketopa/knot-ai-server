@@ -20,12 +20,12 @@ import com.knot.ai.global.AiServerProperties;
 class RealPipelineHttpTest {
     private static HttpServer storage;
     @Test
-    @DisplayName("실제 한국어 녹음을 HTTP API와 설치된 모델로 전사한 뒤 삭제한다")
+    @DisplayName("실제 한국어 녹음을 HTTP API와 설치된 모델로 전사한다")
     void transcribe_success_realKoreanHttpPipeline() throws Exception {
         // given
         Path audio = Path.of(System.getenv("AI_REAL_AUDIO"));
         Path profile = Path.of(System.getenv("AI_REAL_PROFILE"));
-        Path desktop = Path.of("runner")
+        Path runner = Path.of("runner")
                 .toAbsolutePath()
                 .normalize();
         Path work = Files.createTempDirectory("knot-ai-real-http-");
@@ -63,7 +63,7 @@ class RealPipelineHttpTest {
         Map<String, Object> settings = settings(
                 work,
                 profile,
-                desktop
+                runner
         );
         ConfigurableApplicationContext context = new SpringApplicationBuilder(
                 AiServerApplication.class,
@@ -83,41 +83,13 @@ class RealPipelineHttpTest {
         JsonMapper mapper = JsonMapper.builder()
                 .findAndAddModules()
                 .build();
-        String profileId = mapper.readTree(profile.toFile())
-                .path("id")
-                .asString();
         UUID attemptId = UUID.randomUUID();
-        Map<String, Object> input = Map.of(
-                "bucket",
-                "test-bucket",
-                "key",
-                "recordings/audio.webm",
-                "etag",
-                "\"fixture\"",
-                "downloadUrl",
-                "https://test-bucket.s3.ap-northeast-2.amazonaws.com/recordings/audio.webm?fixture=1",
-                "requiredHeaders",
-                Map.of(
-                        "If-Match",
-                        "\"fixture\""
-                ),
-                "contentLength",
-                bytes.length,
-                "contentType",
-                "audio/webm"
-        );
         String body = mapper.writeValueAsString(
                 Map.of(
                         "attemptId",
                         attemptId,
-                        "profileId",
-                        profileId,
-                        "requestValidUntil",
-                        Instant.now()
-                                .plusSeconds(1800)
-                                .toString(),
-                        "input",
-                        input
+                        "downloadUrl",
+                        "https://test-bucket.s3.ap-northeast-2.amazonaws.com/recordings/audio.webm?fixture=1"
                 )
         );
         try {
@@ -162,28 +134,6 @@ class RealPipelineHttpTest {
                             .path("text")
                             .asString()
                             .matches("(?s).*[가-힣].*")
-            );
-            HttpResponse<String> deletion = client.send(
-                    request(origin.resolve("/api/v1/transcription-jobs/" + attemptId)).DELETE()
-                            .build(),
-                    HttpResponse.BodyHandlers.ofString()
-            );
-            assertEquals(
-                    204,
-                    deletion.statusCode()
-            );
-            JsonNode expired = mapper.readTree(
-                    client.send(
-                            request(origin.resolve("/api/v1/transcription-jobs/" + attemptId)).GET()
-                                    .build(),
-                            HttpResponse.BodyHandlers.ofString()
-                    )
-                            .body()
-            );
-            assertEquals(
-                    "EXPIRED",
-                    expired.path("status")
-                            .asString()
             );
         } finally {
             context.close();
@@ -249,7 +199,7 @@ class RealPipelineHttpTest {
     private Map<String, Object> settings(
             Path work,
             Path profile,
-            Path desktop
+            Path runner
     ) {
         Map<String, Object> settings = new HashMap<>();
         settings.put(
@@ -273,20 +223,12 @@ class RealPipelineHttpTest {
                 profile.toString()
         );
         settings.put(
-                "ai.desktop-directory",
-                desktop.toString()
+                "ai.runner-directory",
+                runner.toString()
         );
         settings.put(
                 "ai.allowed-s3-hosts",
                 "test-bucket.s3.ap-northeast-2.amazonaws.com"
-        );
-        settings.put(
-                "ai.bucket",
-                "test-bucket"
-        );
-        settings.put(
-                "ai.key-prefix",
-                "recordings/"
         );
         settings.put(
                 "ai.inference-timeout",

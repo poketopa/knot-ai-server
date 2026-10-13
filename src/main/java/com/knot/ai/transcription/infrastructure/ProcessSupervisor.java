@@ -140,7 +140,7 @@ class ProcessSupervisor {
                         directory.resolve("process-owner.json")
                                 .toString(),
                         "--cwd",
-                        properties.desktopDirectory()
+                        properties.runnerDirectory()
                                 .toString(),
                         "--deadline-seconds",
                         Long.toString(timeout.toSeconds()),
@@ -152,7 +152,7 @@ class ProcessSupervisor {
     }
 
     private Path supervisor() {
-        return properties.desktopDirectory()
+        return properties.runnerDirectory()
                 .resolve("scripts/serverSupervisor.py");
     }
 

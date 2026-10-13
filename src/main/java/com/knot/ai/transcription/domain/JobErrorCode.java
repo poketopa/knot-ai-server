@@ -1,11 +1,6 @@
 package com.knot.ai.transcription.domain;
 
-import com.knot.ai.global.exception.ErrorCode;
-
-public enum JobErrorCode implements ErrorCode {
-    REQUEST_EXPIRED(400),
-    PROFILE_MISMATCH(409),
-    IDEMPOTENCY_CONFLICT(409),
+public enum JobErrorCode {
     BUSY(409),
     NOT_READY(503),
     JOB_NOT_FOUND(404),
@@ -13,7 +8,6 @@ public enum JobErrorCode implements ErrorCode {
     INFERENCE_FAILED(500),
     CANCELED(409),
     INVALID_RESULT(500),
-    INVALID_AUDIO_DURATION(400),
     AUDIO_DURATION_EXCEEDED(400),
     INVALID_AUDIO_FORMAT(400),
     INVALID_PROFILE(503),
@@ -27,11 +21,8 @@ public enum JobErrorCode implements ErrorCode {
     DOWNLOAD_FAILED(502),
     DOWNLOAD_TIMEOUT(504),
     INCOMPLETE_DOWNLOAD(502),
-    INPUT_CHANGED(409),
     INVALID_AUDIO_METADATA(400),
-    INVALID_DOWNLOAD_HEADERS(400),
     INVALID_DOWNLOAD_URL(400),
-    MISSING_OBJECT_VALIDATOR(400),
     STT_FAILED(500),
     DIARIZATION_FAILED(500),
     DIARIZATION_EMPTY(500),
@@ -46,18 +37,12 @@ public enum JobErrorCode implements ErrorCode {
         this.status = status;
     }
 
-    @Override
     public String getCode() {
         return name();
     }
 
-    @Override
     public int getStatus() {
         return status;
     }
 
-    @Override
-    public String getMessage() {
-        return "전사 작업을 처리할 수 없습니다";
-    }
 }

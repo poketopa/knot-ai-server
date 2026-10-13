@@ -2,7 +2,7 @@ package com.knot.ai.transcription.infrastructure;
 
 import com.knot.ai.global.AiServerProperties;
 import com.knot.ai.transcription.application.TranscriptionEngine;
-import com.knot.ai.transcription.application.dto.command.CreateJobCommand;
+import com.knot.ai.transcription.application.TranscriptionRequest;
 import com.knot.ai.transcription.domain.JobErrorCode;
 import com.knot.ai.transcription.domain.JobException;
 import com.knot.ai.transcription.domain.TranscriptResult;
@@ -24,6 +24,8 @@ import tools.jackson.databind.json.JsonMapper;
 
 @Component
 public class HeadlessTranscriptionEngine implements TranscriptionEngine {
+    private static final long MAXIMUM_RESULT_BYTES = 268_435_456L;
+
     private final AiServerProperties properties;
     private final S3AudioDownloader downloader;
     private final JsonMapper mapper;
@@ -57,19 +59,13 @@ public class HeadlessTranscriptionEngine implements TranscriptionEngine {
     }
 
     @Override
-    public String getProfileId() {
-        return profile.path("id")
-                .asString();
-    }
-
-    @Override
     public boolean isReady() {
         return ready;
     }
 
     @Override
-    public TranscriptResult transcribe(CreateJobCommand command) throws Exception {
-        Path directory = directory(command.attemptId());
+    public TranscriptResult transcribe(TranscriptionRequest request) throws Exception {
+        Path directory = directory(request.attemptId());
         Files.createDirectory(directory);
         Files.setPosixFilePermissions(
                 directory,
@@ -78,27 +74,9 @@ public class HeadlessTranscriptionEngine implements TranscriptionEngine {
         Path source = directory.resolve("input.webm");
         Path wav = directory.resolve("input.wav");
         downloader.download(
-                command.input(),
+                request.downloadUrl(),
                 source
         );
-        supervisor.runDecoding(
-                List.of(
-                        properties.ffprobe(),
-                        "-v",
-                        "error",
-                        "-show_entries",
-                        "format=duration",
-                        "-of",
-                        "default=noprint_wrappers=1:nokey=1",
-                        "-o",
-                        directory.resolve("duration.txt")
-                                .toString(),
-                        source.toString()
-                ),
-                directory,
-                properties.conversionTimeout()
-        );
-        audioInspector.verifyContainerDuration(directory.resolve("duration.txt"));
         supervisor.runDecoding(
                 List.of(
                         properties.ffmpeg(),
@@ -125,10 +103,6 @@ public class HeadlessTranscriptionEngine implements TranscriptionEngine {
         double duration = audioInspector.readPcmDuration(wav);
         Map<String, Object> manifest = new LinkedHashMap<>();
         manifest.put(
-                "schemaVersion",
-                1
-        );
-        manifest.put(
                 "audioPath",
                 wav.toString()
         );
@@ -140,15 +114,10 @@ public class HeadlessTranscriptionEngine implements TranscriptionEngine {
                 "profile",
                 profile
         );
-        manifest.put(
-                "timeoutMs",
-                properties.inferenceTimeout()
-                        .toMillis()
-        );
-        if (command.speakerCount() != null) {
+        if (request.speakerCount() != null) {
             manifest.put(
                     "speakerCount",
-                    command.speakerCount()
+                    request.speakerCount()
             );
         }
         Path input = directory.resolve("input.json");
@@ -169,7 +138,7 @@ public class HeadlessTranscriptionEngine implements TranscriptionEngine {
                 properties.inferenceTimeout()
         );
         Path resultFile = directory.resolve("result.json");
-        if (!Files.isRegularFile(resultFile) || Files.size(resultFile) > properties.maximumResultBytes()) {
+        if (!Files.isRegularFile(resultFile) || Files.size(resultFile) > MAXIMUM_RESULT_BYTES) {
             throw new JobException(JobErrorCode.INVALID_RESULT);
         }
         TranscriptResult result = mapper.readValue(
@@ -245,22 +214,15 @@ public class HeadlessTranscriptionEngine implements TranscriptionEngine {
     }
 
     private Path supervisor() {
-        return properties.desktopDirectory()
+        return properties.runnerDirectory()
                 .resolve("scripts/serverSupervisor.py");
     }
 
     private void validateProfile() {
-        if (!profile.path("id")
-                .isString() || profile.path("id")
-                        .asString()
-                        .isBlank()) {
-            throw new JobException(JobErrorCode.INVALID_PROFILE);
-        }
         for (String command : List.of(
                 properties.python(),
                 properties.pnpm(),
                 properties.ffmpeg(),
-                properties.ffprobe(),
                 "node"
         )) {
             if (!hasExecutable(command)) {
@@ -287,8 +249,6 @@ public class HeadlessTranscriptionEngine implements TranscriptionEngine {
                 .asInt() <= 0
                 || profile.path("diarizeThreads")
                         .asInt() <= 0
-                || !profile.path("parallel")
-                        .isBoolean()
                 || !Files.isRegularFile(supervisor())) {
             throw new JobException(JobErrorCode.INVALID_PROFILE);
         }

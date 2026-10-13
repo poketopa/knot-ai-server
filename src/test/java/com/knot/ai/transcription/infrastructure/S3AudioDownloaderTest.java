@@ -2,33 +2,67 @@ package com.knot.ai.transcription.infrastructure;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.knot.ai.TestFixtures;
-import com.knot.ai.transcription.application.dto.command.CreateJobCommand.AudioInput;
 import com.knot.ai.transcription.domain.JobException;
 import com.sun.net.httpserver.HttpServer;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Map;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class S3AudioDownloaderTest {
+    private static final String DOWNLOAD_URL = "https://test-bucket.s3.ap-northeast-2.amazonaws.com"
+            + "/recordings/audio.webm?X-Amz-Signature=test";
+
     @TempDir
     Path directory;
-    private HttpServer server;
-    private S3AudioDownloader downloader;
-    private String status = "normal";
-    @BeforeEach
-    void prepare() throws Exception {
-        server = HttpServer.create(
+
+    @Test
+    @DisplayName("서명 URL로 오디오를 내려받고 연결을 닫는다")
+    void download_success() throws Exception {
+        // given
+        StubConnection connection = new StubConnection();
+        Path target = directory.resolve("input.webm");
+        S3AudioDownloader downloader = downloader(connection);
+
+        // when
+        downloader.download(
+                DOWNLOAD_URL,
+                target
+        );
+
+        // then
+        assertArrayEquals(
+                new byte[]{1, 2, 3},
+                Files.readAllBytes(target)
+        );
+        assertTrue(connection.disconnected.getCount() == 0);
+        assertFalse(connection.getInstanceFollowRedirects());
+    }
+
+    @Test
+    @DisplayName("S3 리다이렉트 대상에 요청을 보내지 않는다")
+    void download_failure_redirect() throws Exception {
+        // given
+        AtomicBoolean forwarded = new AtomicBoolean();
+        HttpServer server = HttpServer.create(
                 new InetSocketAddress(
                         "127.0.0.1",
                         0
@@ -36,128 +70,81 @@ class S3AudioDownloaderTest {
                 0
         );
         server.createContext(
-                "/recordings/audio.webm",
+                "/redirect",
                 exchange -> {
-                    if (status.equals("redirect")) {
-                        exchange.getResponseHeaders()
-                                .add(
-                                        "Location",
-                                        "http://127.0.0.1/private"
-                                );
-                        exchange.sendResponseHeaders(
-                                302,
-                                -1
-                        );
-                    } else if (status.equals("changed")) {
-                        exchange.sendResponseHeaders(
-                                412,
-                                -1
-                        );
-                    } else {
-                        exchange.getResponseHeaders()
-                                .add(
-                                        "Content-Type",
-                                        "audio/webm"
-                                );
-                        exchange.getResponseHeaders()
-                                .add(
-                                        "ETag",
-                                        "\"fixed\""
-                                );
-                        exchange.sendResponseHeaders(
-                                200,
-                                3
-                        );
-                        exchange.getResponseBody()
-                                .write(new byte[]{1, 2, 3});
-                    }
+                    exchange.getResponseHeaders()
+                            .add(
+                                    "Location",
+                                    "/private"
+                            );
+                    exchange.sendResponseHeaders(
+                            302,
+                            -1
+                    );
+                    exchange.close();
+                }
+        );
+        server.createContext(
+                "/private",
+                exchange -> {
+                    forwarded.set(true);
+                    exchange.sendResponseHeaders(
+                            200,
+                            -1
+                    );
                     exchange.close();
                 }
         );
         server.start();
-        downloader = new S3AudioDownloader(
+        S3AudioDownloader downloader = new S3AudioDownloader(
                 TestFixtures.properties(directory),
                 uri -> (HttpURLConnection) URI.create(
                         "http://127.0.0.1:" + server.getAddress()
-                                .getPort() + uri.getPath()
+                                .getPort() + "/redirect"
                 )
                         .toURL()
                         .openConnection()
         );
+        try {
+            // when
+            JobException exception = assertThrows(
+                    JobException.class,
+                    () -> downloader.download(
+                            DOWNLOAD_URL,
+                            directory.resolve("input.webm")
+                    )
+            );
+
+            // then
+            assertEquals(
+                    "DOWNLOAD_FAILED",
+                    exception.getCode()
+            );
+            assertFalse(forwarded.get());
+        } finally {
+            server.stop(0);
+        }
     }
 
-    @AfterEach
-    void close() {
-        server.stop(0);
-    }
-
-    @Test
-    @DisplayName("고정된 객체를 조건부 GET으로 내려받는다")
-    void download_success_fixedValidator() throws Exception {
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"not a uri", "https://169.254.169.254/audio.webm",
+            "http://test-bucket.s3.ap-northeast-2.amazonaws.com/audio.webm",
+            "https://test-bucket.s3.ap-northeast-2.amazonaws.com:444/audio.webm",
+            "https://user@test-bucket.s3.ap-northeast-2.amazonaws.com/audio.webm",
+            "https://test-bucket.s3.ap-northeast-2.amazonaws.com/audio.webm#fragment",
+            "https://test-bucket.s3.ap-northeast-2.amazonaws.com.attacker.example/audio.webm"})
+    @DisplayName("허용된 S3 HTTPS 주소 외에는 거부한다")
+    void validate_failure_unsafeUrl(String url) throws Exception {
         // given
-        Path target = directory.resolve("input.webm");
-        // when
-        downloader.download(
-                input("https://test-bucket.s3.ap-northeast-2.amazonaws.com/recordings/audio.webm"),
-                target
-        );
-        // then
-        assertArrayEquals(
-                new byte[]{1, 2, 3},
-                Files.readAllBytes(target)
-        );
-    }
+        S3AudioDownloader downloader = downloader(new StubConnection());
 
-    @Test
-    @DisplayName("S3 응답의 리다이렉트는 따라가지 않는다")
-    void download_failure_redirect() {
-        // given
-        status = "redirect";
-        // when
-        JobException exception = assertThrows(
-                JobException.class,
-                () -> downloader.download(
-                        input("https://test-bucket.s3.ap-northeast-2.amazonaws.com/recordings/audio.webm"),
-                        directory.resolve("input.webm")
-                )
-        );
-        // then
-        assertEquals(
-                "DOWNLOAD_FAILED",
-                exception.getCode()
-        );
-    }
-
-    @Test
-    @DisplayName("조건부 GET의 객체 변경은 구분된 실패로 전달한다")
-    void download_failure_inputChanged() {
-        // given
-        status = "changed";
         // when
         JobException exception = assertThrows(
                 JobException.class,
-                () -> downloader.download(
-                        input("https://test-bucket.s3.ap-northeast-2.amazonaws.com/recordings/audio.webm"),
-                        directory.resolve("input.webm")
-                )
+                () -> downloader.validate(url)
         );
-        // then
-        assertEquals(
-                "INPUT_CHANGED",
-                exception.getCode()
-        );
-    }
 
-    @Test
-    @DisplayName("허용하지 않은 호스트에는 연결하지 않는다")
-    void validate_failure_arbitraryHost() {
-        // given
-        AudioInput input = input("https://169.254.169.254/recordings/audio.webm");
-        // when
-        JobException exception = assertThrows(
-                JobException.class,
-                () -> downloader.validate(input)
-        );
         // then
         assertEquals(
                 "INVALID_DOWNLOAD_URL",
@@ -166,157 +153,270 @@ class S3AudioDownloaderTest {
     }
 
     @Test
-    @DisplayName("요청 파일과 URL 경로가 다르면 거부한다")
-    void validate_failure_mismatchedKey() {
+    @DisplayName("HTTPS 기본 포트와 서명 쿼리를 그대로 유지한다")
+    void validate_success_signedUrl() throws Exception {
         // given
-        AudioInput input = input("https://test-bucket.s3.ap-northeast-2.amazonaws.com/recordings/other.webm");
-        // when
-        JobException exception = assertThrows(
-                JobException.class,
-                () -> downloader.validate(input)
+        String url = DOWNLOAD_URL.replace(
+                ".com/",
+                ".com:443/"
         );
+        S3AudioDownloader downloader = downloader(new StubConnection());
+
+        // when
+        URI uri = downloader.validate(url);
+
         // then
         assertEquals(
-                "INVALID_DOWNLOAD_URL",
-                exception.getCode()
-        );
-    }
-
-    @Test
-    @DisplayName("버전 없는 GET에는 고정 ETag 헤더가 필요하다")
-    void validate_failure_missingIfMatch() {
-        // given
-        AudioInput input = new AudioInput(
-                "test-bucket",
-                "recordings/audio.webm",
-                null,
-                "\"fixed\"",
-                "https://test-bucket.s3.ap-northeast-2.amazonaws.com/recordings/audio.webm",
-                Map.of(),
-                3,
-                "audio/webm"
-        );
-        // when
-        JobException exception = assertThrows(
-                JobException.class,
-                () -> downloader.validate(input)
-        );
-        // then
-        assertEquals(
-                "MISSING_OBJECT_VALIDATOR",
-                exception.getCode()
-        );
-    }
-
-    @Test
-    @DisplayName("서명된 host 헤더가 URL과 일치하면 검증을 통과한다")
-    void validate_success_matchingHostHeader() {
-        // given
-        String url = "https://test-bucket.s3.ap-northeast-2.amazonaws.com/recordings/audio.webm";
-        AudioInput input = inputWithHeaders(
                 url,
-                Map.of(
-                        "host",
-                        "test-bucket.s3.ap-northeast-2.amazonaws.com",
-                        "If-Match",
-                        "\"fixed\""
+                uri.toString()
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {-1, 0})
+    @DisplayName("내용 길이가 없거나 비어 있으면 거부한다")
+    void download_failure_missingLength(long contentLength) throws Exception {
+        // given
+        StubConnection connection = new StubConnection();
+        connection.contentLength = contentLength;
+        S3AudioDownloader downloader = downloader(connection);
+
+        // when
+        JobException exception = assertThrows(
+                JobException.class,
+                () -> downloader.download(
+                        DOWNLOAD_URL,
+                        directory.resolve("input.webm")
                 )
         );
 
-        // when
-        URI uri = downloader.validate(input);
-
         // then
         assertEquals(
-                URI.create(url),
-                uri
+                "INVALID_AUDIO_METADATA",
+                exception.getCode()
         );
+        assertFalse(connection.bodyOpened);
     }
 
     @Test
-    @DisplayName("별도 인증 헤더는 S3에 전달하지 않고 거부한다")
-    void validate_failure_authorizationHeader() {
+    @DisplayName("500MiB를 넘는 응답은 본문을 열기 전에 거부한다")
+    void download_failure_oversizedLength() throws Exception {
         // given
-        AudioInput input = inputWithHeaders(
-                "https://test-bucket.s3.ap-northeast-2.amazonaws.com/recordings/audio.webm",
-                Map.of(
-                        "Authorization",
-                        "test-value",
-                        "If-Match",
-                        "\"fixed\""
+        StubConnection connection = new StubConnection();
+        connection.contentLength = 524_288_001L;
+        S3AudioDownloader downloader = downloader(connection);
+
+        // when
+        JobException exception = assertThrows(
+                JobException.class,
+                () -> downloader.download(
+                        DOWNLOAD_URL,
+                        directory.resolve("input.webm")
                 )
         );
 
+        // then
+        assertEquals(
+                "AUDIO_TOO_LARGE",
+                exception.getCode()
+        );
+        assertFalse(connection.bodyOpened);
+    }
+
+    @Test
+    @DisplayName("선언한 길이보다 많은 바이트를 받으면 중단한다")
+    void download_failure_excessBody() throws Exception {
+        // given
+        StubConnection connection = new StubConnection();
+        connection.contentLength = 2;
+        S3AudioDownloader downloader = downloader(connection);
+
         // when
         JobException exception = assertThrows(
                 JobException.class,
-                () -> downloader.validate(input)
+                () -> downloader.download(
+                        DOWNLOAD_URL,
+                        directory.resolve("input.webm")
+                )
         );
 
         // then
         assertEquals(
-                "INVALID_DOWNLOAD_HEADERS",
+                "AUDIO_TOO_LARGE",
                 exception.getCode()
         );
     }
 
     @Test
-    @DisplayName("객체 버전이 URL과 다르면 다운로드 전에 거부한다")
-    void validate_failure_mismatchedVersion() {
+    @DisplayName("선언한 길이보다 일찍 끝나면 불완전한 다운로드로 처리한다")
+    void download_failure_incompleteBody() throws Exception {
         // given
-        AudioInput input = new AudioInput(
-                "test-bucket",
-                "recordings/audio.webm",
-                "version-a",
-                "\"fixed\"",
-                "https://test-bucket.s3.ap-northeast-2.amazonaws.com/recordings/audio.webm?versionId=version-b",
-                Map.of(),
-                3,
-                "audio/webm"
-        );
+        StubConnection connection = new StubConnection();
+        connection.contentLength = 4;
+        S3AudioDownloader downloader = downloader(connection);
 
         // when
         JobException exception = assertThrows(
                 JobException.class,
-                () -> downloader.validate(input)
+                () -> downloader.download(
+                        DOWNLOAD_URL,
+                        directory.resolve("input.webm")
+                )
         );
 
         // then
         assertEquals(
-                "MISSING_OBJECT_VALIDATOR",
+                "INCOMPLETE_DOWNLOAD",
                 exception.getCode()
         );
     }
 
-    private AudioInput inputWithHeaders(
-            String url,
-            Map<String, String> headers
-    ) {
-        return new AudioInput(
-                "test-bucket",
-                "recordings/audio.webm",
-                null,
-                "\"fixed\"",
-                url,
-                headers,
-                3,
-                "audio/webm"
+    @Test
+    @DisplayName("WebM 오디오가 아닌 응답은 거부한다")
+    void download_failure_wrongContentType() throws Exception {
+        // given
+        StubConnection connection = new StubConnection();
+        connection.contentType = "text/html";
+        S3AudioDownloader downloader = downloader(connection);
+
+        // when
+        JobException exception = assertThrows(
+                JobException.class,
+                () -> downloader.download(
+                        DOWNLOAD_URL,
+                        directory.resolve("input.webm")
+                )
+        );
+
+        // then
+        assertEquals(
+                "INVALID_AUDIO_METADATA",
+                exception.getCode()
+        );
+        assertFalse(connection.bodyOpened);
+    }
+
+    @Test
+    @DisplayName("응답이 멈춰도 전체 제한 시간에 연결을 끊는다")
+    void download_failure_deadline() throws Exception {
+        // given
+        StubConnection connection = new StubConnection();
+        connection.stalled = true;
+        S3AudioDownloader downloader = downloader(connection);
+
+        // when
+        JobException exception = assertThrows(
+                JobException.class,
+                () -> downloader.download(
+                        DOWNLOAD_URL,
+                        directory.resolve("input.webm")
+                )
+        );
+
+        // then
+        assertEquals(
+                "DOWNLOAD_TIMEOUT",
+                exception.getCode()
+        );
+        assertTrue(connection.disconnected.getCount() == 0);
+    }
+
+    @Test
+    @DisplayName("인터럽트된 작업은 다운로드를 시작하지 않는다")
+    void download_failure_interrupted() throws Exception {
+        // given
+        StubConnection connection = new StubConnection();
+        S3AudioDownloader downloader = downloader(connection);
+        Thread.currentThread()
+                .interrupt();
+        try {
+            // when
+            JobException exception = assertThrows(
+                    JobException.class,
+                    () -> downloader.download(
+                            DOWNLOAD_URL,
+                            directory.resolve("input.webm")
+                    )
+            );
+
+            // then
+            assertEquals(
+                    "CANCELED",
+                    exception.getCode()
+            );
+            assertFalse(connection.bodyOpened);
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    private S3AudioDownloader downloader(StubConnection connection) {
+        return new S3AudioDownloader(
+                TestFixtures.properties(directory),
+                uri -> connection
         );
     }
 
-    private AudioInput input(String url) {
-        return new AudioInput(
-                "test-bucket",
-                "recordings/audio.webm",
-                null,
-                "\"fixed\"",
-                url,
-                Map.of(
-                        "If-Match",
-                        "\"fixed\""
-                ),
-                3,
-                "audio/webm"
-        );
+    private static class StubConnection extends HttpURLConnection {
+        private final CountDownLatch disconnected = new CountDownLatch(1);
+        private long contentLength = 3;
+        private String contentType = "audio/webm";
+        private boolean bodyOpened;
+        private boolean stalled;
+
+        private StubConnection() throws Exception {
+            super(
+                    URI.create(DOWNLOAD_URL)
+                            .toURL()
+            );
+        }
+
+        @Override
+        public int getResponseCode() throws IOException {
+            if (stalled) {
+                try {
+                    if (!disconnected.await(
+                            5,
+                            TimeUnit.SECONDS
+                    )) {
+                        throw new AssertionError("다운로드 제한 시간에 연결을 끊지 않았습니다");
+                    }
+                } catch (InterruptedException exception) {
+                    Thread.currentThread()
+                            .interrupt();
+                }
+                throw new IOException("연결이 닫혔습니다");
+            }
+            return 200;
+        }
+
+        @Override
+        public String getContentType() {
+            return contentType;
+        }
+
+        @Override
+        public long getContentLengthLong() {
+            return contentLength;
+        }
+
+        @Override
+        public InputStream getInputStream() {
+            bodyOpened = true;
+            return new ByteArrayInputStream(new byte[]{1, 2, 3});
+        }
+
+        @Override
+        public void disconnect() {
+            disconnected.countDown();
+        }
+
+        @Override
+        public boolean usingProxy() {
+            return false;
+        }
+
+        @Override
+        public void connect() {}
     }
 }

@@ -1,11 +1,10 @@
 package com.knot.ai.transcription.application;
 
-import com.knot.ai.transcription.application.dto.command.CreateJobCommand;
 import com.knot.ai.transcription.domain.TranscriptResult;
+import java.util.UUID;
 
 public interface TranscriptionEngine {
-    String getProfileId();
     boolean isReady();
-    TranscriptResult transcribe(CreateJobCommand command) throws Exception;
-    void cleanup(java.util.UUID attemptId) throws Exception;
+    TranscriptResult transcribe(TranscriptionRequest request) throws Exception;
+    void cleanup(UUID attemptId) throws Exception;
 }
