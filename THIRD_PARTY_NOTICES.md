@@ -11,6 +11,6 @@
 | Segmentation 모델 | pyannote segmentation 3.0 ONNX | [sherpa segmentation](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-segmentation-models), [upstream 모델](https://huggingface.co/pyannote/segmentation-3.0) |
 | Embedding 모델 | 3D-Speaker ERes2Net 16k ONNX | [sherpa speaker models](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models), [3D-Speaker](https://github.com/modelscope/3D-Speaker) |
 
-FFmpeg·ffprobe는 오디오 검사와 변환에 사용하며 시스템에 별도로 설치합니다. 실행 파일과 필요한 동적 라이브러리는 현재 시스템에 맞는 빌드를 준비합니다.
+FFmpeg는 오디오 변환에 사용하며 시스템에 별도로 설치합니다. 실행 파일과 필요한 동적 라이브러리는 현재 시스템에 맞는 빌드를 준비합니다.
 
 TypeScript 의존성은 `runner/package.json`과 `runner/pnpm-lock.yaml`, Java 의존성은 `build.gradle`에서 확인합니다. 이 문서는 외부 도구나 모델에 저장소 코드의 라이선스를 새로 부여하지 않습니다.

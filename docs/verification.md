@@ -1,6 +1,30 @@
-# 독립 저장소 분리 검증
+# 검증 기록
 
-2026-10-13 컨벤션 리팩터링 결과는 [AI 서버 컨벤션 정리](convention-refactor.md)의 검증 기록을 참고한다. Java 53개·Node 9개·Python 5개 테스트와 빌드가 통과했고, 실제 모델 테스트 1개는 생략했다. 아래 기록은 2026-10-12 저장소 분리 당시의 결과다.
+## 2026-10-13 최소 구현 재설계
+
+Java/Spring은 유지하고 HTTP 계약과 작업 보관 방식을 변경했다. 현재 구조와 삭제 이유는 [리뷰 안내](convention-refactor.md), 호출 방법은 [HTTP 계약](http-contract.md)에 있다.
+
+| 검사 | 결과 |
+| --- | --- |
+| `./gradlew spotlessApply check bootJar` | 성공. Java 60개 통과, 실제 모델 테스트 1개 생략 |
+| `pnpm --dir runner typecheck` | 성공 |
+| `pnpm --dir runner test` | Node 12개·Python 5개 통과 |
+| `git diff --check` | 성공 |
+| Knot 컨벤션 00~08 원문 hash 검사 | 통과 |
+
+검증한 동작은 현재 작업의 중복 접수, 동시 요청의 단일 실행, cleanup 전 슬롯 유지, 완료 결과 교체와 이전 ID의 404, 종료·정리 실패 후 접수 차단이다. S3 URL·리다이렉트·다운로드 크기·시간 제한과 실제 PCM 길이도 검사했다. runner 테스트는 한글 바이트 복원, VAD·화자 기본 인자, 음량 정규화와 Python deadline에 의한 강제 종료를 포함한다. JVM 강제 종료 후 native 프로세스 회수 테스트도 통과했다.
+
+삭제한 TTL·DELETE·객체 identity·ffprobe 메타데이터 계약의 테스트는 새 계약 검증으로 교체하거나 폐기했다. 기존에 없던 runner 기본 인자·음량 정규화 회귀 테스트는 구현 변경 전에 통과를 확인했다. 독립 코드 리뷰에서 수정이 필요한 회귀는 발견하지 못했다.
+
+`2118b02`와 비교하면 운영 Java·TypeScript·Python 소스는 35개 파일·3,144줄에서 24개 파일·2,362줄로 줄었다. 테스트·설정·문서는 집계에서 제외했다. 새 의존성은 없다.
+
+전체 자동 컨벤션 검사는 성공으로 처리하지 않았다. DB를 사용하지 않는 AI 서버에 적용되지 않는 JPA·Flyway·PostgreSQL·Testcontainers 필수 진단 4개와 검사기의 Java 구문 처리 오탐 2개가 남는다. 오탐은 여러 줄 상수를 일반 필드로 읽는 `JAVA-FIELD-BLANK`, text block의 URL을 주석으로 읽는 `TEST-GWT`다. 해당 필드 구분과 테스트 Given–When–Then은 직접 확인했다. Gradle 컴파일·Spotless·테스트는 통과했다.
+
+실제 모델·S3·EC2 연결과 운영 배포는 검증하지 않았다. 다운로드 deadline 검증은 연결 stub 기반이므로 실제 소켓이 멈춘 환경의 정확한 종료 시간을 입증하지 않는다.
+
+## 이전 검증
+
+같은 날 `2118b02`의 컨벤션 리팩터링에서는 Java 53개·Node 9개·Python 5개 테스트와 빌드가 통과했고, 실제 모델 테스트 1개는 생략했다. 아래는 2026-10-12 저장소 분리 당시의 기록이며 현재 HTTP 계약을 설명하지 않는다.
 
 2026-10-12 macOS에서 서버 빌드와 기존 회귀 테스트를 실행했습니다. 운영 Java 코드와 runner의 TypeScript·Python 코드는 기존 구현을 보존했습니다.
 

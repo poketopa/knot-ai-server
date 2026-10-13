@@ -1,76 +1,52 @@
-# AI 서버 컨벤션 정리
+# AI 서버 최소화 리뷰 안내
 
-## 범위와 완료 조건
+Java/Spring을 유지하면서 모델 실행과 전사 결과 전달에 필요한 코드만 남깁니다. EC2 연결 전이므로 HTTP 계약을 바꾸고, 현재 작업 하나를 메모리에만 보관하기로 사용자가 결정했습니다. 재시작 시 EC2가 재요청하며, 과거 작업 조회·결과 복구는 구현하지 않습니다.
 
-2026-10-13 기준 `cf2204c`의 AI 서버를 Knot 백엔드 컨벤션에 맞춘다. 기존 HTTP 계약과 모델 실행 동작을 회귀 테스트로 유지하며, 작업 단위 커밋으로 나눠 리뷰할 수 있게 한다.
+## 삭제한 책임
 
-## 수정 순서
-
-1. 기존 Java·runner 테스트로 기준 동작을 확인하고, 상태 전이·인증·오류·취소에서 부족한 회귀 검증을 먼저 추가한다.
-2. 작업의 상태 전이·멱등성·결과 만료 규칙은 Domain으로 옮긴다. Application은 단일 실행 슬롯과 스레드 생명주기를 조정한다. Domain에는 Application DTO·Thread·Spring 의존성을 두지 않는다.
-3. 오류 코드·한글 메시지·응답 상태를 한 계약으로 관리한다. 외부 runner 오류 문자열은 Infrastructure 경계에서 알려진 코드로 변환한다.
-4. HTTP Request·Response와 Application 입력·결과의 책임을 구분한다. 경로·필드·상태·인증 규칙은 유지하고 검증 메시지를 한글로 명시한다.
-5. 모델 실행 어댑터의 프로세스 감독, 오디오 변환·길이 검사 등 독립적인 기술 책임을 분리한다. 취소·정리 완료 전 슬롯 해제 금지와 소유권 검사는 유지한다.
-6. Java 작성 규칙과 테스트 형식을 정리하고 전체 검사·독립 리뷰를 수행한다. 코드 읽는 순서와 실행 흐름 문서를 갱신한다.
-
-## 보존할 동작
-
-- 활성 전사 1개, 대기열 0, 보관 중인 성공 결과가 있으면 BUSY
-- 동일 attempt의 입력 일치 검사, 결과 삭제·만료 후 재실행 방지, 메모리 상태의 재시작 경계
-- 인증 필수, S3 호스트·객체 identity·크기 검증, 원문과 인증값 비노출
-- 모델·runner·supervisor 계약과 종료·강제 종료·잔존 프로세스 정리
-- 빈 발화 결과 거부를 포함한 기존 HTTP 계약. 정상 빈 전사 정책은 EC2 연결 단계에서 별도 조율
-
-## 컨벤션 적용 장부
-
-| 규칙 | 적용 범위 |
+| 삭제한 구조 | 현재 방식 |
 | --- | --- |
-| STACK | Java 25·Spring Boot 4.1·Gradle 유지 |
-| LIB | 새 의존성 없음. OpenAPI 라이브러리 도입은 이번 범위에서 제외 |
-| LAYER | Domain 상태 규칙, Application 조정, Infrastructure I/O, Presentation HTTP |
-| MODEL | Domain과 HTTP 응답 분리, 값·컬렉션 불변성 |
-| API | 기존 계약 보존, 코드 기반 오류, 한글 Validation, 내부 정보 비노출 |
-| DB | 해당 없음. 기존 메모리 작업 관리 유지, DB·migration 추가 없음 |
-| JAVA | 명시적 import·이름·상수·멤버 순서·120자·인자 줄바꿈·Spotless |
-| TEST | Domain 직접 검증, Service 동시성, MVC 계약, subprocess·S3 stub 검증 |
-| AI | 직접 코드 검토와 동작 검증, 비밀값 복사 금지 |
-| DELIVERY | 사용자 요청에 따라 작업 단위 커밋과 main 푸시. GitHub Issue·PR·배포는 범위 밖 |
+| 작업 Map, Domain 작업 aggregate, identity 비교 | 현재 `JobSnapshot` 하나와 worker 하나 |
+| 결과 TTL, 주기적 정리, 종료 기록, 요청 만료 | 다음 작업 접수 때 결과 교체 |
+| DELETE, 취소·만료 상태 | POST 접수와 GET 조회, 세 가지 상태 |
+| Request → Command → Response 복제 | `TranscriptionRequest`와 `JobSnapshot` 공유 |
+| bucket·key·ETag·version·요청 헤더 계약 | presigned URL 하나. 불변 객체 발급은 EC2 책임 |
+| 요청 profileId와 프로필 협상 | 서버에 설정된 모델 사용 |
+| ffprobe 선검사 | 디코딩한 PCM의 실제 형식·길이 검사 |
+| runner 병렬 옵션, 진행률 parser, 별도 timeout 타이머 | 항상 병렬 실행, Python이 제한 시간 감독 |
+| 단일 구현용 공통 오류 인터페이스와 여러 파일의 오류 DTO | 전사 오류 enum과 작은 공통 오류 record |
 
-기준은 Knot `노션/knot/백엔드`의 00~08 원문과 승인된 Java/API 컨벤션이다. DB·FE-BE 전용 규칙은 AI 서버 역할에 맞는 범위만 적용한다. 새 아키텍처 프레임워크나 모든 클래스의 인터페이스화를 도입하지 않는다.
+EC2는 결과를 저장한 뒤 다음 작업을 보내야 합니다. 현재 ID의 재요청은 기존 결과를 반환하지만 교체된 ID에는 이 보장이 없습니다. 구체적인 응답과 재시도 조건은 [HTTP 계약](http-contract.md)을 기준으로 합니다.
 
-## 코드 읽는 순서
+## 남긴 책임
 
-1. `transcription/presentation/TranscriptionJobController`: 요청을 Command로 변환하고 Application 결과를 HTTP Response로 반환한다.
-2. `transcription/application/TranscriptionJobService`: 단일 실행 슬롯, worker thread, 주기적 만료 정리를 조정한다. Command와 Snapshot은 각각 `application/dto/command`, `application/dto/result`에 둔다.
-3. `transcription/domain/TranscriptionJob`: 상태 전이, 동일 입력 판정, 결과 만료와 제거 조건을 맡는다. 실행 중인 스레드와 Command는 Application 내부 `RunningJob`이 소유한다.
-4. `transcription/infrastructure/HeadlessTranscriptionEngine`: 다운로드·오디오 검사·변환·추론·결과 읽기 순서를 조정한다. `AudioInspector`는 오디오 검사를, `ProcessSupervisor`는 프로세스 실행·종료·소유권 정리를 맡는다.
-5. `global/exception`과 `transcription/domain/JobErrorCode`: 공통 오류 응답과 전사 오류 코드를 확인한다.
+- `TranscriptionEngine`: 실제 모델 I/O를 대체해 Service의 동시성과 실패를 검증하는 경계입니다.
+- 다운로드 제한과 PCM 검사: 잘못된 입력, 끝나지 않는 전송, 크거나 긴 녹음을 모델 실행 전에 거부합니다.
+- Python supervisor와 소유권 기록: JVM이 사라져도 native 모델을 정리하고 다음 실행과의 중복을 막습니다. 메모리 상태만 쓰더라도 필요합니다.
+- 결과 검증과 모델 처리 로직: 원본 JSON, 발화 순서·시간·텍스트의 일관성, 한글 복원·음량·화자 병합을 유지합니다.
 
-리뷰는 API/DTO → Domain/Service → Infrastructure 순으로 나눠 볼 수 있다. 각 영역의 회귀 테스트는 같은 패키지의 `src/test/java`에 있다. 별도 DB, 가짜 Repository, 기술 helper용 인터페이스는 추가하지 않았다. 기존 `TranscriptionEngine`은 외부 모델 실행 경계로 유지했다.
+파일 수를 줄이려고 서로 다른 I/O 책임까지 한 클래스에 합치지 않았습니다. 새로운 의존성은 추가하지 않습니다.
 
-## 동작상 확인할 변경
+## 리뷰 순서
 
-- runner 진단의 `CANCELLED`는 서버가 쓰는 `CANCELED`로 통일했다. 알려지지 않은 진단 문자열은 그대로 반환하지 않고 `INFERENCE_FAILED`로 변환한다.
-- null 발화를 포함한 결과는 `NullPointerException` 대신 `INVALID_RESULT`로 거부한다. 개별 발화의 불변식은 `Utterance` 생성 시 확인한다.
-- 누락된 Validation 메시지를 한글로 명시했다. 생성 202·삭제 204, 응답 필드와 상태 이름, 원본 전사 JSON 문자열, Bearer 인증 실패 응답은 유지했다.
+1. Controller의 작은 요청·응답 계약과 Service의 현재 ID·BUSY·결과 교체 규칙을 확인합니다.
+2. Service가 cleanup 전에 다음 실행을 허용하지 않는지, 정리 실패·종료 뒤 접수를 막는지 확인합니다.
+3. Downloader의 URL·바이트 제한, PCM 길이 검사와 supervisor의 소유 프로세스 정리를 확인합니다.
+4. runner의 한글·시간·화자 처리와 실제 subprocess 테스트를 확인합니다.
 
-## 검증 기록
+관련 테스트는 Java 소스와 같은 패키지의 `src/test/java`, `runner/scripts/serverPipeline.test.ts`, `runner/scripts/serverSupervisor.test.py`에 있습니다. 실행한 검사와 미검증 범위는 [검증 기록](verification.md)에 모읍니다.
 
-2026-10-13 로컬 검증 결과다.
+## 컨벤션 적용 범위
 
-| 검사 | 결과 |
+기준은 Knot 백엔드 00~08 원문과 승인된 Java/API 컨벤션입니다. AI 서버 역할과 사용자가 확정한 최소화 범위에 맞춰 적용합니다.
+
+| 규칙 | 적용 |
 | --- | --- |
-| `./gradlew check bootJar --rerun-tasks` | 성공. 후속 포맷·Validation 문구 수정 후 `check bootJar`도 성공 |
-| Java 테스트 | 53개 통과, 실제 모델 테스트 1개 생략, 실패 0개 |
-| `pnpm --dir runner typecheck` | 성공 |
-| `pnpm --dir runner test` | Node 9개·Python 5개 통과 |
-| `git diff --check` | 성공 |
-| 컨벤션 원문 00~08 hash 검사 | 통과 |
-
-작업 취소 후 cleanup 완료 전 슬롯 유지, 취소 후 늦은 성공 무시, 결과 TTL, 멱등성 충돌, HTTP 응답 형태, S3 요청 검증, runner 오류 코드 변환을 확인했다. JVM 종료 후 자식 프로세스 회수 테스트도 포함한다.
-
-독립 코드 리뷰에서도 수정이 필요한 회귀 문제는 발견하지 못했다. Service·Controller·Engine·Downloader 핵심 테스트를 별도로 실행해 통과했다. 이 결과는 실제 모델이나 운영 연결의 성공을 보장하지 않는다.
-
-앱 서버용 컨벤션 검사에는 AI 서버에 해당하지 않는 DB 필수 항목 4개와 `Map<UUID, RunningJob>` 단일 필드를 복수 선언으로 읽는 오탐 1개가 남는다. `verify_backend.py --full`은 Knot workspace 밖의 독립 AI 저장소를 탐색하지 못해 중단되므로 Gradle을 직접 실행했다. 자동 검사 전체 통과를 뜻하지 않는다.
-
-실제 모델·실제 S3·EC2 연결은 검증하지 않았다. 빈 전사 처리 정책과 EC2의 전사 요청·결과 저장·삭제 재시도는 후속 연결 작업에서 조율한다.
+| STACK·LIB | Java 25·Spring Boot·Gradle 유지, 새 의존성 없음 |
+| LAYER·MODEL | HTTP·작업 조정·결과 불변식·I/O 경계 유지. 중복 입력·출력 DTO 생략 |
+| API | 사용자 승인으로 계약 변경, Bearer 인증·오류 코드·한글 검증·원문 비노출 유지 |
+| DB | 해당 없음. DB·Repository·migration 없음 |
+| JAVA | 명시적 import·이름·상수·줄바꿈·Spotless 적용 |
+| TEST | 결과 불변식, Service 동시성, MVC 계약, S3 stub과 subprocess 검증 |
+| AI | 실제 diff와 검증 증거로 리뷰, 비밀값 복사 금지 |
+| DELIVERY | 사용자 요청에 따라 작업 단위 커밋·푸시. Issue·PR·배포는 범위 밖 |
