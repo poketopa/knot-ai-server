@@ -1,10 +1,16 @@
-package com.knot.ai.transcription.presentation;
+package com.knot.ai.transcription.presentation.dto.request;
+
+import com.knot.ai.transcription.application.dto.command.CreateJobCommand;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Positive;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.*;
-import com.knot.ai.transcription.application.dto.command.CreateJobCommand;
+
 public record CreateJobRequest(
         @NotNull(message = "전사 요청 ID는 필수입니다") UUID attemptId,
         @NotBlank(message = "실행 프로필은 필수입니다") String profileId,
@@ -21,6 +27,7 @@ public record CreateJobRequest(
                 speakerCount
         );
     }
+
     public record Input(
             @NotBlank(message = "버킷은 필수입니다") String bucket,
             @NotBlank(message = "객체 경로는 필수입니다") String key,
@@ -29,7 +36,7 @@ public record CreateJobRequest(
             @NotBlank(message = "다운로드 URL은 필수입니다") String downloadUrl,
             Map<String, String> requiredHeaders,
             @Positive(message = "파일 크기는 양수여야 합니다") @Max(value = 524288000, message = "파일이 너무 큽니다") long contentLength,
-            @Pattern(regexp = "audio/webm", message = "WebM 오디오만 허용합니다") @NotNull String contentType
+            @Pattern(regexp = "audio/webm", message = "WebM만 허용합니다") @NotNull(message = "타입은 필수입니다") String contentType
     ) {
         public CreateJobCommand.AudioInput toInput() {
             return new CreateJobCommand.AudioInput(
