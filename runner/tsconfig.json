@@ -9,16 +9,7 @@
     "skipLibCheck": true,
     "types": [
       "node"
-    ],
-    "baseUrl": ".",
-    "paths": {
-      "@meeting-stt/core/*": [
-        "src/core/*"
-      ],
-      "@shared/types": [
-        "src/core/types.ts"
-      ]
-    }
+    ]
   },
   "include": [
     "scripts/**/*.ts",

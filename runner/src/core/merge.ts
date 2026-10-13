@@ -1,7 +1,7 @@
 import type { MergedUtterance, SpeakerPiece, SpeakerSegment, SttSegment, SttWord } from './types'
 
 /** 배정할 화자를 찾지 못한 조각에 붙는 라벨 */
-export const UNKNOWN_SPEAKER = 'UNKNOWN'
+const UNKNOWN_SPEAKER = 'UNKNOWN'
 
 /** 이보다 짧은 발화는 맞장구·잡음일 가능성이 높아 이웃 발화에 흡수한다 */
 const MIN_UTTERANCE_SEC = 0.5
@@ -14,7 +14,7 @@ const NEAREST_SPEAKER_TOLERANCE_SEC = 1
 
 /**
  * 총 발화 시간이 이보다 짧은 화자는 파편 클러스터로 보고 이웃 주요 화자에 흡수한다.
- * cluster-threshold를 올려도 짧은 구간의 임베딩이 불안정해 1~8초짜리 화자가 남는다 (docs/phase1-results.md).
+ * 짧은 구간의 불안정한 임베딩으로 생긴 화자 분할을 보정한다.
  */
 const MINOR_SPEAKER_TOTAL_SEC = 10
 
@@ -26,7 +26,7 @@ const MIN_VOTE_WEIGHT_SEC = 0.05
 
 /**
  * 문장이 이보다 길어지면 다음 Whisper 세그먼트 경계에서 끊는다. 문장부호가 빠진 전사·반복 환각 구간에서
- * 한 "문장"이 수십 초로 커져 다른 화자의 말을 삼키는 것을 막는다 (docs/phase1-results.md 9절)
+ * 한 "문장"이 수십 초로 커져 다른 화자의 말을 삼키는 것을 막는다.
  */
 const MAX_SENTENCE_SEC = 8
 
@@ -128,7 +128,7 @@ const nearestMajorSpeaker = ({
  * 총 발화 시간이 MINOR_SPEAKER_TOTAL_SEC 미만인 군소 화자의 구간을 가장 가까운 주요 화자에게 넘긴다.
  * 주요 화자가 한 명도 없으면(아주 짧은 녹음) 그대로 둔다.
  */
-export const absorbMinorSpeakers = (speakerSegments: SpeakerSegment[]) => {
+const absorbMinorSpeakers = (speakerSegments: SpeakerSegment[]) => {
   const totals = totalDurationBySpeaker(speakerSegments)
   const majorLabels = new Set(
     [...totals].filter(([, total]) => total >= MINOR_SPEAKER_TOTAL_SEC).map(([label]) => label)
@@ -199,9 +199,9 @@ const majoritySpeaker = (sentence: SpeakerPiece[]) => {
 
 /**
  * 단어별 배정을 문장 단위 다수결로 덮어쓴다. 단어 타임스탬프와 화자 구간 경계가 어긋나
- * 문장 끝 단어가 옆 화자로 넘어가며 한 문장이 두 화자로 쪼개지는 것을 막는다 (references/data-model.md)
+ * 문장 끝 단어가 옆 화자로 넘어가며 한 문장이 두 화자로 쪼개지는 것을 막는다.
  */
-export const voteBySentence = ({ pieces, isSegmentEnds }: VoteBySentenceParams) =>
+const voteBySentence = ({ pieces, isSegmentEnds }: VoteBySentenceParams) =>
   groupBySentence({ pieces, isSegmentEnds }).flatMap((sentence) => {
     const speaker = majoritySpeaker(sentence)
     return sentence.map((piece) => ({ ...piece, speaker }))
@@ -212,7 +212,7 @@ interface AssignSpeakersParams {
   speakerSegments: SpeakerSegment[]
   /**
    * 참석자 수(`num-clusters`)로 군집한 결과는 클러스터가 전부 실제 화자이므로 false로 준다.
-   * 흡수하면 짧게 한 마디 한 참석자가 사라진다 (references/architecture.md)
+   * 흡수하면 짧게 한 마디 한 참석자가 사라진다.
    */
   isMinorSpeakerAbsorbed?: boolean
 }

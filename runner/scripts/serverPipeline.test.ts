@@ -1,14 +1,21 @@
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import { test } from 'node:test'
 import { mkdtemp, readFile, writeFile, chmod, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { promisify } from 'node:util'
+import { buildWhisperArgs } from '../src/main/pipeline/whisper'
+import { buildDiarizeArgs } from '../src/main/pipeline/diarize'
+import { normalizeWavFile } from '../src/main/pipeline/normalize'
 import {
   assembleResult,
   runServerPipeline,
   validateManifest,
   type ServerManifest
 } from './serverPipeline'
+
+const execute = promisify(execFile)
 
 const raw = Buffer.from(
   JSON.stringify({ transcription: [{ offsets: { from: 0, to: 1000 }, text: '안녕' }] })
@@ -41,6 +48,59 @@ const wav = () => {
   buffer.writeUInt32LE(32000, 40)
   return buffer
 }
+test('native arguments preserve Korean, VAD and speaker clustering defaults', () => {
+  assert.deepEqual(
+    buildWhisperArgs({
+      modelPath: '/models/whisper.bin',
+      audioPath: '/job/audio.wav',
+      outputPath: '/job/whisper',
+      threads: 4,
+      vadModelPath: '/models/vad.bin'
+    }).filter((argument) => argument !== '--print-progress'),
+    ['-m', '/models/whisper.bin', '-f', '/job/audio.wav', '-l', 'ko', '-t', '4',
+      '--output-json-full', '-of', '/job/whisper', '--no-prints', '--vad', '--vad-model',
+      '/models/vad.bin']
+  )
+  const parameters = {
+    segmentationModelPath: '/models/segmentation.onnx',
+    embeddingModelPath: '/models/embedding.onnx',
+    audioPath: '/job/audio.wav',
+    threads: 2
+  }
+  assert.deepEqual(buildDiarizeArgs(parameters), [
+    '--clustering.cluster-threshold=0.8',
+    '--segmentation.pyannote-model=/models/segmentation.onnx',
+    '--embedding.model=/models/embedding.onnx',
+    '--segmentation.num-threads=2', '--embedding.num-threads=2', '/job/audio.wav'
+  ])
+  assert.deepEqual(buildDiarizeArgs({ ...parameters, speakerCount: 3 }), [
+    '--clustering.num-clusters=3', ...buildDiarizeArgs(parameters).slice(1)
+  ])
+})
+
+for (const amplitude of [0, 1000]) {
+  test(`WAV normalization preserves header and ${amplitude ? 'raises quiet speech' : 'keeps silence'}`, async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'server-normalize-'))
+    try {
+      const input = wav()
+      for (let offset = 44; offset < input.length; offset += 2) {
+        input.writeInt16LE((offset % 4 ? -1 : 1) * amplitude, offset)
+      }
+      const inputPath = path.join(directory, 'audio.wav')
+      const outputPath = path.join(directory, 'normalized.wav')
+      await writeFile(inputPath, input)
+      await normalizeWavFile({ inputPath, outputPath })
+      const output = await readFile(outputPath)
+      assert.equal(output.length, input.length)
+      assert.deepEqual(output.subarray(0, 44), input.subarray(0, 44))
+      for (let offset = 44; offset < output.length; offset += 2) {
+        assert.equal(output.readInt16LE(offset), amplitude ? (offset % 4 ? -3277 : 3277) : 0)
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+}
 test('headless fake engines produce an atomic complete artifact', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'server-runner-'))
   try {
@@ -53,13 +113,10 @@ test('headless fake engines produce an atomic complete artifact', async () => {
     const audioPath = path.join(directory, 'audio.wav')
     await writeFile(audioPath, wav())
     const manifest: ServerManifest = {
-      schemaVersion: 1,
       audioPath,
       outputDirectory: directory,
       speakerCount: 1,
-      timeoutMs: 5000,
       profile: {
-        id: 'test',
         whisperBinary: engine,
         diarizeBinary: engine,
         whisperModel: engine,
@@ -67,8 +124,7 @@ test('headless fake engines produce an atomic complete artifact', async () => {
         segmentationModel: engine,
         embeddingModel: engine,
         sttThreads: 1,
-        diarizeThreads: 1,
-        parallel: true
+        diarizeThreads: 1
       }
     }
     await runServerPipeline(validateManifest(manifest))
@@ -80,7 +136,7 @@ test('headless fake engines produce an atomic complete artifact', async () => {
     await rm(directory, { recursive: true, force: true })
   }
 })
-test('timeout escalates termination of a SIGTERM-resistant engine', async () => {
+test('supervisor deadline terminates runner and SIGTERM-resistant native engines', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'server-timeout-'))
   try {
     const engine = path.join(directory, 'engine')
@@ -92,12 +148,9 @@ test('timeout escalates termination of a SIGTERM-resistant engine', async () => 
     const audioPath = path.join(directory, 'audio.wav')
     await writeFile(audioPath, wav())
     const manifest: ServerManifest = {
-      schemaVersion: 1,
       audioPath,
       outputDirectory: directory,
-      timeoutMs: 1000,
       profile: {
-        id: 'test',
         whisperBinary: engine,
         diarizeBinary: engine,
         whisperModel: engine,
@@ -105,15 +158,36 @@ test('timeout escalates termination of a SIGTERM-resistant engine', async () => 
         segmentationModel: engine,
         embeddingModel: engine,
         sttThreads: 1,
-        diarizeThreads: 1,
-        parallel: true
+        diarizeThreads: 1
       }
     }
+    const manifestPath = path.join(directory, 'manifest.json')
+    const ownershipPath = path.join(directory, 'process-owner.json')
+    await writeFile(manifestPath, JSON.stringify(manifest))
     const start = performance.now()
-    await assert.rejects(runServerPipeline(manifest), /INFERENCE_TIMEOUT/)
+    await assert.rejects(
+      execute('python3', [
+        path.resolve('scripts/serverSupervisor.py'),
+        '--parent-pid', String(process.pid),
+        '--ownership', ownershipPath,
+        '--cwd', directory,
+        '--deadline-seconds', '2',
+        '--', process.execPath,
+        path.resolve('node_modules/tsx/dist/cli.mjs'),
+        path.resolve('scripts/serverPipeline.ts'), '--manifest', manifestPath
+      ], { timeout: 12000 }),
+      (error: NodeJS.ErrnoException) => Number(error.code) === 124
+    )
     assert.equal(await readFile(path.join(directory, 'resistant.ready'), 'utf8'), 'ready')
-    assert.ok(performance.now() - start >= 1700)
-    assert.ok(performance.now() - start < 5000)
+    const owner = JSON.parse(await readFile(ownershipPath, 'utf8'))
+    assert.equal(owner.state, 'CLEANED')
+    const { stdout } = await execute('ps', ['-axo', 'pid=,pgid=,stat='])
+    assert.ok(!stdout.trim().split('\n').some((line) => {
+      const [, group, state] = line.trim().split(/\s+/)
+      return Number(group) === owner.pgid && !state.includes('Z')
+    }), 'No live process may remain in the supervised group')
+    assert.ok(performance.now() - start >= 2000)
+    assert.ok(performance.now() - start < 10000)
     await assert.rejects(readFile(path.join(directory, 'result.json')))
   } finally {
     await rm(directory, { recursive: true, force: true })
@@ -173,12 +247,9 @@ for (const failedStage of ['STT_FAILED', 'DIARIZATION_FAILED'] as const) {
       const audioPath = path.join(directory, 'audio.wav')
       await writeFile(audioPath, wav())
       const manifest: ServerManifest = {
-        schemaVersion: 1,
         audioPath,
         outputDirectory: directory,
-        timeoutMs: 5000,
         profile: {
-          id: 'stage-test',
           whisperBinary: engine,
           diarizeBinary: engine,
           whisperModel: engine,
@@ -186,8 +257,7 @@ for (const failedStage of ['STT_FAILED', 'DIARIZATION_FAILED'] as const) {
           segmentationModel: engine,
           embeddingModel: engine,
           sttThreads: 1,
-          diarizeThreads: 1,
-          parallel: false
+          diarizeThreads: 1
         }
       }
       await assert.rejects(runServerPipeline(manifest), new RegExp(failedStage))

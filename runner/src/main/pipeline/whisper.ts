@@ -1,4 +1,4 @@
-import type { SttSegment, SttWord } from '@shared/types'
+import type { SttSegment, SttWord } from '../../core/types'
 
 const DEFAULT_LANGUAGE = 'ko'
 const MS_PER_SEC = 1000
@@ -6,7 +6,6 @@ const MS_PER_SEC = 1000
 const MS_PER_DTW_UNIT = 10
 const DTW_DISABLED = -1
 const SPECIAL_TOKEN_PREFIX = '[_'
-const PROGRESS_PATTERN = /progress\s*=\s*(\d+)%/
 
 interface WhisperToken {
   text: string
@@ -31,7 +30,7 @@ interface WhisperSegment {
 /**
  * whisper-cli의 --output-json-full 결과는 유효한 UTF-8이 아니다.
  * 토큰이 한글 한 글자를 바이트 단위로 쪼개기 때문에, 바이트를 보존하는 latin1로 읽고
- * 토큰을 이어붙인 뒤에 UTF-8로 되돌려야 한다 (references/pitfalls.md).
+ * 토큰을 이어붙인 뒤에 UTF-8로 되돌려야 한다.
  */
 const decodeUtf8 = (latin1Text: string) => Buffer.from(latin1Text, 'latin1').toString('utf-8')
 
@@ -95,7 +94,7 @@ interface RemapParams {
 /**
  * VAD를 켜면 세그먼트 시간만 원본 시간축으로 복원되고 토큰 시간은 압축된 시간축에 남는다.
  * 세그먼트의 from은 직전 세그먼트의 to를 그대로 쓴 값이라 믿을 수 없고, to만 실제 발화 끝을 가리킨다.
- * 그래서 **끝을 기준으로** 되돌려 토큰 구간 길이를 보존한다 (references/pitfalls.md).
+ * 그래서 끝을 기준으로 되돌려 토큰 구간 길이를 보존한다.
  * 세그먼트 안에서 무음이 많이 제거돼 토큰 구간이 더 길어지면 선형 재매핑으로 되돌아간다.
  */
 const remapToSegment = ({ value, tokenFrom, tokenTo, segmentFrom, segmentTo }: RemapParams) => {
@@ -152,12 +151,6 @@ export const parseWhisperOutput = (raw: Buffer): SttSegment[] => {
   })
 }
 
-/** 진행률 로그 한 줄에서 퍼센트를 읽는다. 포맷이 바뀌면 null (진행률만 숨기고 작업은 계속) */
-export const parseWhisperProgress = (line: string) => {
-  const matched = line.match(PROGRESS_PATTERN)
-  return matched ? Number(matched[1]) : null
-}
-
 interface BuildWhisperArgsParams {
   modelPath: string
   audioPath: string
@@ -165,12 +158,6 @@ interface BuildWhisperArgsParams {
   outputPath: string
   threads: number
   vadModelPath?: string
-  language?: string
-  /**
-   * DTW 토큰 타임스탬프. flash attention과 배타적이라 -nfa를 함께 넣어야 한다
-   * (안 그러면 whisper-cli가 조용히 DTW를 끈다).
-   */
-  dtwPreset?: string
 }
 
 export const buildWhisperArgs = ({
@@ -178,23 +165,19 @@ export const buildWhisperArgs = ({
   audioPath,
   outputPath,
   threads,
-  vadModelPath,
-  language = DEFAULT_LANGUAGE,
-  dtwPreset
+  vadModelPath
 }: BuildWhisperArgsParams) => [
   '-m',
   modelPath,
   '-f',
   audioPath,
   '-l',
-  language,
+  DEFAULT_LANGUAGE,
   '-t',
   String(threads),
   '--output-json-full',
   '-of',
   outputPath,
-  '--print-progress',
   '--no-prints',
-  ...(vadModelPath ? ['--vad', '--vad-model', vadModelPath] : []),
-  ...(dtwPreset ? ['--no-flash-attn', '-dtw', dtwPreset] : [])
+  ...(vadModelPath ? ['--vad', '--vad-model', vadModelPath] : [])
 ]

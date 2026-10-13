@@ -2,19 +2,16 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { assignSpeakers, mergeUtterances } from '@meeting-stt/core/merge'
+import { assignSpeakers, mergeUtterances } from '../src/core/merge'
 import { buildDiarizeArgs, parseDiarizeOutput } from '../src/main/pipeline/diarize'
 import { normalizeWavFile } from '../src/main/pipeline/normalize'
 import { buildWhisperArgs, parseWhisperOutput } from '../src/main/pipeline/whisper'
 
 export interface ServerManifest {
-  schemaVersion: 1
   audioPath: string
   outputDirectory: string
   speakerCount?: number
-  timeoutMs: number
   profile: {
-    id: string
     whisperBinary: string
     diarizeBinary: string
     whisperModel: string
@@ -23,7 +20,6 @@ export interface ServerManifest {
     embeddingModel: string
     sttThreads: number
     diarizeThreads: number
-    parallel: boolean
   }
 }
 
@@ -34,15 +30,10 @@ export const validateManifest = (value: unknown): ServerManifest => {
   const manifest = value as ServerManifest
   if (
     !manifest ||
-    manifest.schemaVersion !== 1 ||
     !manifest.profile ||
-    !positiveInteger(manifest.timeoutMs) ||
     (manifest.speakerCount !== undefined && !positiveInteger(manifest.speakerCount)) ||
     !positiveInteger(manifest.profile.sttThreads) ||
-    !positiveInteger(manifest.profile.diarizeThreads) ||
-    typeof manifest.profile.parallel !== 'boolean' ||
-    typeof manifest.profile.id !== 'string' ||
-    !manifest.profile.id.trim()
+    !positiveInteger(manifest.profile.diarizeThreads)
   )
     throw new Error('INVALID_MANIFEST')
   const paths = [
@@ -111,7 +102,6 @@ export const runServerPipeline = async (manifest: ServerManifest) => {
   const signal = () => stop('CANCELLED')
   process.on('SIGTERM', signal)
   process.on('SIGINT', signal)
-  const timer = setTimeout(() => stop('INFERENCE_TIMEOUT'), manifest.timeoutMs)
   const run = (
     command: string,
     args: string[],
@@ -197,12 +187,7 @@ export const runServerPipeline = async (manifest: ServerManifest) => {
         true,
         'DIARIZATION_FAILED'
       )
-    let diarization: string
-    if (p.parallel) [, diarization] = await Promise.all([stt(), diarize()])
-    else {
-      await stt()
-      diarization = await diarize()
-    }
+    const [, diarization] = await Promise.all([stt(), diarize()])
     const result = assembleResult(
       await readFile(`${prefix}.json`),
       diarization,
@@ -213,7 +198,6 @@ export const runServerPipeline = async (manifest: ServerManifest) => {
     await writeFile(temporary, JSON.stringify(result), { encoding: 'utf8', mode: 0o600 })
     await rename(temporary, path.join(manifest.outputDirectory, 'result.json'))
   } finally {
-    clearTimeout(timer)
     process.off('SIGTERM', signal)
     process.off('SIGINT', signal)
     for (const child of children) child.kill('SIGKILL')

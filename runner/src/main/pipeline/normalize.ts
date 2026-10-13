@@ -1,11 +1,8 @@
 import { readFile, writeFile } from 'node:fs/promises'
-import { frameSamplesOf, gainDbFor, gainOf, speechRmsDbOf } from '@meeting-stt/core/normalize'
 
 /**
  * STT 전에 WAV 음량을 맞추는 RMS 게인 정규화.
  * whisper.cpp는 입력 음량을 정규화하지 않아 원거리 마이크 녹음(발화 -44 dBFS)에서 수십 초를 통째로 놓친다.
- * ffmpeg를 동봉하지 않으므로 순수 TS로 구현한다 (docs/phase1-results.md, SKILL.md 결정 표).
- * 목표 음량·게인 상한·프레임 길이 같은 값은 브라우저 앱과 같아야 하므로 `@meeting-stt/core/normalize`에 있다.
  */
 
 const INT16_MAX = 32767
@@ -14,6 +11,11 @@ const RIFF_HEADER_BYTES = 12
 const CHUNK_HEADER_BYTES = 8
 const PCM_FORMAT_TAG = 1
 const SUPPORTED_BITS_PER_SAMPLE = 16
+const FRAME_MS = 50
+const SPEECH_RMS_PERCENTILE = 0.9
+const TARGET_SPEECH_RMS_DBFS = -20
+const MAX_GAIN_DB = 30
+const MS_PER_SEC = 1000
 
 interface WavChunk {
   id: string
@@ -43,7 +45,7 @@ interface WavPcm {
 }
 
 /** 16bit PCM WAV에서 헤더 길이·샘플레이트·샘플 배열을 꺼낸다 */
-export const readWavPcm = (buffer: Buffer): WavPcm => {
+const readWavPcm = (buffer: Buffer): WavPcm => {
   const chunks = listChunks(buffer)
   const fmt = chunks.find((chunk) => chunk.id === 'fmt ')
   const data = chunks.find((chunk) => chunk.id === 'data')
@@ -67,8 +69,8 @@ export const readWavPcm = (buffer: Buffer): WavPcm => {
 }
 
 /** 발화 구간의 대표 음량(dBFS). 무음뿐이면 -Infinity */
-export const measureSpeechRmsDb = ({ pcm, sampleRate }: Pick<WavPcm, 'pcm' | 'sampleRate'>) => {
-  const frameSamples = frameSamplesOf({ sampleRate })
+const measureSpeechRmsDb = ({ pcm, sampleRate }: Pick<WavPcm, 'pcm' | 'sampleRate'>) => {
+  const frameSamples = Math.max(1, Math.round((sampleRate * FRAME_MS) / MS_PER_SEC))
   const frameRms: number[] = []
 
   for (let start = 0; start + frameSamples <= pcm.length; start += frameSamples) {
@@ -80,49 +82,40 @@ export const measureSpeechRmsDb = ({ pcm, sampleRate }: Pick<WavPcm, 'pcm' | 'sa
     frameRms.push(Math.sqrt(sumSquares / frameSamples))
   }
 
-  return speechRmsDbOf({ frameRms })
+  if (frameRms.length === 0) return -Infinity
+  frameRms.sort((left, right) => left - right)
+  const index = Math.min(frameRms.length - 1, Math.floor(frameRms.length * SPEECH_RMS_PERCENTILE))
+  return 20 * Math.log10(frameRms[index])
 }
 
 /** 게인을 적용하고 int16 범위를 넘는 샘플은 하드 클립한다 */
-export const applyGain = ({ pcm, gainDb }: { pcm: Int16Array; gainDb: number }) => {
-  const gain = gainOf(gainDb)
+const applyGain = ({ pcm, gainDb }: { pcm: Int16Array; gainDb: number }) => {
+  const gain = 10 ** (gainDb / 20)
   const output = new Int16Array(pcm.length)
-  let clippedCount = 0
 
   for (let i = 0; i < pcm.length; i += 1) {
     const scaled = pcm[i] * gain
-    if (scaled > INT16_MAX || scaled < -INT16_MAX) clippedCount += 1
     output[i] = Math.max(-INT16_MAX, Math.min(INT16_MAX, Math.round(scaled)))
   }
 
-  return { pcm: output, clippedCount }
+  return output
 }
 
-export interface NormalizeResult {
-  speechRmsDb: number
-  gainDb: number
-  clippedRatio: number
-}
-
-/** WAV 버퍼 전체를 정규화한 새 버퍼와 측정값을 돌려준다. 헤더는 그대로 두고 PCM만 바꾼다 */
-export const normalizeWavBuffer = (buffer: Buffer) => {
+/** 헤더를 보존하고 정규화한 PCM을 붙인다. */
+const normalizeWavBuffer = (buffer: Buffer) => {
   const { headerBytes, sampleRate, pcm } = readWavPcm(buffer)
   const speechRmsDb = measureSpeechRmsDb({ pcm, sampleRate })
-  const gainDb = gainDbFor(speechRmsDb)
-  const { pcm: normalized, clippedCount } = applyGain({ pcm, gainDb })
+  const gainDb = Number.isFinite(speechRmsDb)
+    ? Math.min(TARGET_SPEECH_RMS_DBFS - speechRmsDb, MAX_GAIN_DB)
+    : 0
+  const normalized = applyGain({ pcm, gainDb })
 
   const body = Buffer.from(
     normalized.buffer,
     normalized.byteOffset,
     normalized.length * BYTES_PER_SAMPLE
   )
-  const result: NormalizeResult = {
-    speechRmsDb,
-    gainDb,
-    clippedRatio: pcm.length === 0 ? 0 : clippedCount / pcm.length
-  }
-
-  return { buffer: Buffer.concat([buffer.subarray(0, headerBytes), body]), result }
+  return Buffer.concat([buffer.subarray(0, headerBytes), body])
 }
 
 interface NormalizeWavFileParams {
@@ -132,7 +125,5 @@ interface NormalizeWavFileParams {
 
 /** 녹음 WAV를 읽어 정규화본을 outputPath에 쓴다. whisper·diarization은 이 파일을 읽는다 */
 export const normalizeWavFile = async ({ inputPath, outputPath }: NormalizeWavFileParams) => {
-  const { buffer, result } = normalizeWavBuffer(await readFile(inputPath))
-  await writeFile(outputPath, buffer)
-  return result
+  await writeFile(outputPath, normalizeWavBuffer(await readFile(inputPath)))
 }
