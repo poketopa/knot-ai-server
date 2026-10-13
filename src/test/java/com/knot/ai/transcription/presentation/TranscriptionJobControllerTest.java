@@ -11,7 +11,10 @@ import org.springframework.test.web.servlet.*;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import com.knot.ai.TestFixtures;
 import com.knot.ai.global.*;
-import com.knot.ai.transcription.application.*;
+import com.knot.ai.transcription.application.TranscriptionJobService;
+import com.knot.ai.transcription.application.dto.result.JobSnapshot;
+import com.knot.ai.transcription.domain.JobStatus;
+import com.knot.ai.transcription.domain.JobErrorCode;
 import com.knot.ai.transcription.domain.JobException;
 class TranscriptionJobControllerTest {
     @TempDir
@@ -82,7 +85,7 @@ class TranscriptionJobControllerTest {
         when(service.create(any())).thenReturn(
                 new JobSnapshot(
                         attemptId,
-                        JobSnapshot.Status.PROCESSING,
+                        JobStatus.PROCESSING,
                         null,
                         null
                 )
@@ -112,12 +115,7 @@ class TranscriptionJobControllerTest {
     void get_failure_unknownJob() throws Exception {
         // given
         UUID attemptId = UUID.randomUUID();
-        when(service.get(attemptId)).thenThrow(
-                new JobException(
-                        "JOB_NOT_FOUND",
-                        404
-                )
-        );
+        when(service.get(attemptId)).thenThrow(new JobException(JobErrorCode.JOB_NOT_FOUND));
         // when
         ResultActions response = mvc.perform(
                 get("/api/v1/transcription-jobs/" + attemptId).header(

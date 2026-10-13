@@ -1,28 +1,40 @@
 package com.knot.ai.transcription.application;
+
+import com.knot.ai.global.AiServerProperties;
+import com.knot.ai.transcription.application.dto.command.CreateJobCommand;
+import com.knot.ai.transcription.application.dto.result.JobSnapshot;
+import com.knot.ai.transcription.domain.JobErrorCode;
+import com.knot.ai.transcription.domain.JobException;
+import com.knot.ai.transcription.domain.JobStatus;
+import com.knot.ai.transcription.domain.TranscriptResult;
+import com.knot.ai.transcription.domain.TranscriptionJob;
+import jakarta.annotation.PreDestroy;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
-import com.knot.ai.global.AiServerProperties;
-import com.knot.ai.transcription.domain.JobException;
-import com.knot.ai.transcription.domain.TranscriptResult;
-import jakarta.annotation.PreDestroy;
+
 @Service
 public class TranscriptionJobService {
-    private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger(TranscriptionJobService.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(TranscriptionJobService.class);
 
     private final TranscriptionEngine engine;
     private final AiServerProperties properties;
     private final Clock clock;
-    private final Map<UUID, Job> jobs = new HashMap<>();
+    private final Map<UUID, RunningJob> jobs = new HashMap<>();
     private final ScheduledExecutorService janitor = Executors.newSingleThreadScheduledExecutor();
     private UUID activeId;
     private boolean cleanupFailed;
 
-    @org.springframework.beans.factory.annotation.Autowired
+    @Autowired
     public TranscriptionJobService(
             TranscriptionEngine engine,
             AiServerProperties properties
@@ -33,6 +45,7 @@ public class TranscriptionJobService {
                 Clock.systemUTC()
         );
     }
+
     TranscriptionJobService(
             TranscriptionEngine engine,
             AiServerProperties properties,
@@ -48,50 +61,33 @@ public class TranscriptionJobService {
                 TimeUnit.SECONDS
         );
     }
+
     public synchronized JobSnapshot create(CreateJobCommand command) {
         expireRecords();
         Instant now = clock.instant();
         if (!command.requestValidUntil()
                 .isAfter(now) || command.requestValidUntil()
                         .isAfter(now.plus(properties.requestValidityLimit()))) {
-            throw new JobException(
-                    "REQUEST_EXPIRED",
-                    400
-            );
+            throw new JobException(JobErrorCode.REQUEST_EXPIRED);
         }
         if (!engine.getProfileId()
                 .equals(command.profileId())) {
-            throw new JobException(
-                    "PROFILE_MISMATCH",
-                    409
-            );
+            throw new JobException(JobErrorCode.PROFILE_MISMATCH);
         }
-        Job existing = jobs.get(command.attemptId());
+        RunningJob existing = jobs.get(command.attemptId());
         if (existing != null) {
-            if (!existing.command.fingerprint()
-                    .equals(command.fingerprint())) {
-                throw new JobException(
-                        "IDEMPOTENCY_CONFLICT",
-                        409
-                );
-            }
+            existing.job.validateSameIdentity(command.identity());
             return existing.snapshot();
         }
         if (activeId != null || jobs.size() >= properties.maximumRecords() || jobs.values()
                 .stream()
-                .anyMatch(job -> job.result != null)) {
-            throw new JobException(
-                    "BUSY",
-                    409
-            );
+                .anyMatch(job -> job.job.hasRetainedResult())) {
+            throw new JobException(JobErrorCode.BUSY);
         }
         if (cleanupFailed || !engine.isReady()) {
-            throw new JobException(
-                    "NOT_READY",
-                    503
-            );
+            throw new JobException(JobErrorCode.NOT_READY);
         }
-        Job job = new Job(command);
+        RunningJob job = RunningJob.create(command);
         jobs.put(
                 command.attemptId(),
                 job
@@ -103,38 +99,42 @@ public class TranscriptionJobService {
         try {
             job.worker.start();
         } catch (RuntimeException exception) {
-            job.fail(
-                    "EXECUTOR_REJECTED",
+            job.job.fail(
+                    JobErrorCode.EXECUTOR_REJECTED,
                     now
             );
             activeId = null;
         }
         return job.snapshot();
     }
+
     public synchronized JobSnapshot get(UUID attemptId) {
         expireRecords();
         return requireJob(attemptId).snapshot();
     }
+
     public synchronized void delete(UUID attemptId) {
-        Job job = requireJob(attemptId);
-        if (job.status == JobSnapshot.Status.PROCESSING) {
-            job.fail(
-                    "CANCELED",
+        RunningJob job = requireJob(attemptId);
+        if (job.job.getStatus() == JobStatus.PROCESSING) {
+            job.job.fail(
+                    JobErrorCode.CANCELED,
                     clock.instant()
             );
             job.worker.interrupt();
         }
-        job.result = null;
-        job.status = JobSnapshot.Status.EXPIRED;
+        job.job.expire();
     }
+
     public boolean isReady() {
         synchronized (this) {
             return !cleanupFailed && engine.isReady();
         }
     }
+
     public String getProfileId() {
         return engine.getProfileId();
     }
+
     @PreDestroy
     public void close() {
         janitor.shutdownNow();
@@ -154,25 +154,29 @@ public class TranscriptionJobService {
             }
         }
     }
-    private void execute(Job job) {
+
+    private void execute(RunningJob job) {
         try {
             TranscriptResult result = engine.transcribe(job.command);
             synchronized (this) {
-                if (job.status == JobSnapshot.Status.PROCESSING) {
-                    job.result = result;
-                    job.status = JobSnapshot.Status.SUCCEEDED;
-                    job.finishedAt = clock.instant();
-                }
+                job.job.succeed(
+                        result,
+                        clock.instant()
+                );
             }
         } catch (Exception exception) {
             synchronized (this) {
-                if (job.status == JobSnapshot.Status.PROCESSING) {
-                    String code = exception instanceof JobException failure ? failure.getCode() : "INFERENCE_FAILED";
-                    job.fail(
-                            code,
+                if (exception instanceof JobException failure) {
+                    job.job.fail(
+                            failure.getErrorCode(),
                             clock.instant()
                     );
+                    return;
                 }
+                job.job.fail(
+                        JobErrorCode.INFERENCE_FAILED,
+                        clock.instant()
+                );
             }
         } finally {
             // Cleanup completes before releasing the only inference slot.
@@ -193,60 +197,66 @@ public class TranscriptionJobService {
             }
         }
     }
-    private Job requireJob(UUID attemptId) {
-        Job job = jobs.get(attemptId);
+
+    private RunningJob requireJob(UUID attemptId) {
+        RunningJob job = jobs.get(attemptId);
         if (job == null) {
-            throw new JobException(
-                    "JOB_NOT_FOUND",
-                    404
-            );
+            throw new JobException(JobErrorCode.JOB_NOT_FOUND);
         }
         return job;
     }
+
     private void expireSafely() {
         synchronized (this) {
             expireRecords();
         }
     }
+
     private void expireRecords() {
         Instant now = clock.instant();
-        for (Job job : jobs.values()) {
-            if (job.finishedAt != null && !now.isBefore(job.finishedAt.plus(properties.resultRetention()))) {
-                job.result = null;
-                job.status = JobSnapshot.Status.EXPIRED;
-            }
+        for (RunningJob job : jobs.values()) {
+            job.job.expireResult(
+                    now,
+                    properties.resultRetention()
+            );
         }
         jobs.values()
                 .removeIf(
-                        job -> job.status != JobSnapshot.Status.PROCESSING && !job.command.attemptId()
-                                .equals(activeId) && !now.isBefore(job.command.requestValidUntil())
-                                && (job.status != JobSnapshot.Status.SUCCEEDED)
+                        job -> !job.command.attemptId()
+                                .equals(activeId) && job.job.isRemovable(now)
                 );
     }
-    private static class Job {
+
+    private static class RunningJob {
         private final CreateJobCommand command;
-        private JobSnapshot.Status status = JobSnapshot.Status.PROCESSING;
-        private String failureCode;
-        private TranscriptResult result;
-        private Instant finishedAt;
+        private final TranscriptionJob job;
         private Thread worker;
-        private Job(CreateJobCommand command) {
-            this.command = command;
-        }
-        private void fail(
-                String code,
-                Instant now
+
+        private RunningJob(
+                CreateJobCommand command,
+                TranscriptionJob job
         ) {
-            status = JobSnapshot.Status.FAILED;
-            failureCode = code;
-            finishedAt = now;
+            this.command = command;
+            this.job = job;
         }
+
+        private static RunningJob create(CreateJobCommand command) {
+            return new RunningJob(
+                    command,
+                    TranscriptionJob.create(
+                            command.attemptId(),
+                            command.identity(),
+                            command.requestValidUntil()
+                    )
+            );
+        }
+
         private JobSnapshot snapshot() {
             return new JobSnapshot(
                     command.attemptId(),
-                    status,
-                    failureCode,
-                    result
+                    job.getStatus(),
+                    job.getFailureCode(),
+                    job.getResult()
             );
         }
     }

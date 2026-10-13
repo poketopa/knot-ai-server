@@ -4,7 +4,7 @@ import java.util.Map;
 import java.util.UUID;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
-import com.knot.ai.transcription.application.CreateJobCommand;
+import com.knot.ai.transcription.application.dto.command.CreateJobCommand;
 public record CreateJobRequest(
         @NotNull(message = "전사 요청 ID는 필수입니다") UUID attemptId,
         @NotBlank(message = "실행 프로필은 필수입니다") String profileId,

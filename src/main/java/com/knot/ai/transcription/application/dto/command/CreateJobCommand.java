@@ -1,7 +1,10 @@
-package com.knot.ai.transcription.application;
+package com.knot.ai.transcription.application.dto.command;
+
+import com.knot.ai.transcription.domain.JobIdentity;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
+
 public record CreateJobCommand(
         UUID attemptId,
         String profileId,
@@ -23,8 +26,9 @@ public record CreateJobCommand(
             requiredHeaders = requiredHeaders == null ? Map.of() : Map.copyOf(requiredHeaders);
         }
     }
-    public Fingerprint fingerprint() {
-        return new Fingerprint(
+
+    public JobIdentity identity() {
+        return new JobIdentity(
                 input.bucket(),
                 input.key(),
                 input.versionId(),
@@ -32,14 +36,5 @@ public record CreateJobCommand(
                 speakerCount,
                 profileId
         );
-    }
-    public record Fingerprint(
-            String bucket,
-            String key,
-            String versionId,
-            String etag,
-            Integer speakerCount,
-            String profileId
-    ) {
     }
 }

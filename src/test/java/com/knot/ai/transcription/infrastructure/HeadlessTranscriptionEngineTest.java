@@ -1,17 +1,33 @@
 package com.knot.ai.transcription.infrastructure;
-import static org.junit.jupiter.api.Assertions.*;
-import java.nio.file.*;
-import java.nio.file.attribute.PosixFilePermissions;
-import java.time.*;
-import java.net.*;
-import java.util.*;
-import org.junit.jupiter.api.*;
-import org.junit.jupiter.api.io.TempDir;
-import com.sun.net.httpserver.HttpServer;
-import tools.jackson.databind.json.JsonMapper;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
 import com.knot.ai.global.AiServerProperties;
-import com.knot.ai.transcription.application.CreateJobCommand;
-import com.knot.ai.transcription.domain.*;
+import com.knot.ai.transcription.application.dto.command.CreateJobCommand;
+import com.knot.ai.transcription.domain.JobException;
+import com.knot.ai.transcription.domain.TranscriptResult;
+import com.sun.net.httpserver.HttpServer;
+import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import tools.jackson.databind.json.JsonMapper;
+
 class HeadlessTranscriptionEngineTest {
     @TempDir
     Path directory;
@@ -145,10 +161,12 @@ class HeadlessTranscriptionEngineTest {
                 mapper
         );
     }
+
     @AfterEach
     void close() {
         server.stop(0);
     }
+
     @Test
     @DisplayName("감독 프로세스로 변환과 runner를 실행하고 완성 결과만 공개한다")
     void transcribe_success_supervisedPipeline() throws Exception {
@@ -174,6 +192,7 @@ class HeadlessTranscriptionEngineTest {
                 )
         );
     }
+
     @Test
     @DisplayName("2시간을 초과한 파일은 추론 전에 거부한다")
     void transcribe_failure_durationExceeded() throws Exception {
@@ -196,6 +215,7 @@ class HeadlessTranscriptionEngineTest {
         );
         engine.cleanup(command.attemptId());
     }
+
     @Test
     @DisplayName("runner가 원본만 출력하면 작업 성공으로 처리하지 않는다")
     void transcribe_failure_rawOnly() throws Exception {
@@ -217,6 +237,7 @@ class HeadlessTranscriptionEngineTest {
         assertNotNull(exception);
         engine.cleanup(command.attemptId());
     }
+
     @Test
     @DisplayName("길이 정보 없는 MediaRecorder WebM은 디코딩된 PCM 길이로 검증한다")
     void transcribe_success_missingContainerDuration() throws Exception {
@@ -238,6 +259,7 @@ class HeadlessTranscriptionEngineTest {
         );
         engine.cleanup(command.attemptId());
     }
+
     @Test
     @DisplayName("디코딩 실행 제한 시간이 지나면 단계별 timeout을 반환한다")
     void transcribe_failure_decodeTimeout() throws Exception {
@@ -259,6 +281,7 @@ class HeadlessTranscriptionEngineTest {
         );
         engine.cleanup(command.attemptId());
     }
+
     @Test
     @DisplayName("컨테이너 길이가 없어도 실제 PCM이 2시간을 넘으면 거부한다")
     void transcribe_failure_decodedDurationExceeded() throws Exception {
@@ -288,6 +311,74 @@ class HeadlessTranscriptionEngineTest {
         );
         engine.cleanup(command.attemptId());
     }
+
+    @Test
+    @DisplayName("runner가 알려진 진단 코드를 남기면 허용된 작업 오류 코드로 반환한다")
+    void transcribe_failure_knownRunnerDiagnostic() throws Exception {
+        // given
+        diagnosticRunner("STT_FAILED");
+        CreateJobCommand command = command();
+        // when
+        JobException exception = assertThrows(
+                JobException.class,
+                () -> engine.transcribe(command)
+        );
+        // then
+        assertEquals(
+                "STT_FAILED",
+                exception.getCode()
+        );
+        engine.cleanup(command.attemptId());
+    }
+
+    @Test
+    @DisplayName("runner의 CANCELLED 진단은 서버 오류 코드 CANCELED로 보정한다")
+    void transcribe_failure_cancelledRunnerDiagnostic() throws Exception {
+        // given
+        diagnosticRunner("CANCELLED");
+        CreateJobCommand command = command();
+        // when
+        JobException exception = assertThrows(
+                JobException.class,
+                () -> engine.transcribe(command)
+        );
+        // then
+        assertEquals(
+                "CANCELED",
+                exception.getCode()
+        );
+        engine.cleanup(command.attemptId());
+    }
+
+    @Test
+    @DisplayName("runner의 알 수 없는 진단은 추론 실패로 숨긴다")
+    void transcribe_failure_unknownRunnerDiagnostic() throws Exception {
+        // given
+        diagnosticRunner("SECRET_PATH_LEAK");
+        CreateJobCommand command = command();
+        // when
+        JobException exception = assertThrows(
+                JobException.class,
+                () -> engine.transcribe(command)
+        );
+        // then
+        assertEquals(
+                "INFERENCE_FAILED",
+                exception.getCode()
+        );
+        engine.cleanup(command.attemptId());
+    }
+
+    private void diagnosticRunner(String code) throws Exception {
+        Files.writeString(
+                pnpm,
+                "#!/usr/bin/env python3\nimport sys,pathlib,json\n"
+                        + "m=json.loads(pathlib.Path(sys.argv[-1]).read_text())\n"
+                        + "pathlib.Path(m['outputDirectory'],'diagnostic.json').write_text(json.dumps({'code':'" + code
+                        + "'}))\nsys.exit(1)\n"
+        );
+    }
+
     private Path script(
             String name,
             String body
@@ -303,6 +394,7 @@ class HeadlessTranscriptionEngineTest {
         );
         return path;
     }
+
     private CreateJobCommand command() {
         return new CreateJobCommand(
                 UUID.randomUUID(),

@@ -5,7 +5,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import jakarta.validation.Valid;
 import com.knot.ai.transcription.application.TranscriptionJobService;
-import com.knot.ai.transcription.application.JobSnapshot;
+import com.knot.ai.transcription.application.dto.result.JobSnapshot;
 @RestController
 public class TranscriptionJobController {
     private final TranscriptionJobService service;

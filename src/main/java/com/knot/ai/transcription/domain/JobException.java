@@ -1,19 +1,22 @@
 package com.knot.ai.transcription.domain;
+
 public class JobException extends RuntimeException {
-    private final String code;
-    private final int status;
-    public JobException(
-            String code,
-            int status
-    ) {
-        super("전사 작업을 처리할 수 없습니다");
-        this.code = code;
-        this.status = status;
+    private final JobErrorCode errorCode;
+
+    public JobException(JobErrorCode errorCode) {
+        super(errorCode.getMessage());
+        this.errorCode = errorCode;
     }
+
+    public JobErrorCode getErrorCode() {
+        return errorCode;
+    }
+
     public String getCode() {
-        return code;
+        return errorCode.getCode();
     }
+
     public int getStatus() {
-        return status;
+        return errorCode.getStatus();
     }
 }
