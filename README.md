@@ -9,13 +9,18 @@ S3에 저장된 녹음을 내려받아 Whisper 전사와 화자 분리를 실행
 | 파일 | 책임 |
 | --- | --- |
 | [TranscriptionJobController](src/main/java/com/knot/ai/transcription/presentation/TranscriptionJobController.java) | 작업 생성·조회·삭제 HTTP API |
-| [TranscriptionJobService](src/main/java/com/knot/ai/transcription/application/TranscriptionJobService.java) | 단일 실행 슬롯, 중복 요청, 취소, 결과 만료 |
+| [TranscriptionJobService](src/main/java/com/knot/ai/transcription/application/TranscriptionJobService.java) | 요청 순서, 단일 실행 슬롯, 스레드 실행과 정리 |
+| [TranscriptionJob](src/main/java/com/knot/ai/transcription/domain/TranscriptionJob.java) | 같은 작업 판정, 성공·실패·만료 전이와 늦은 결과 차단 |
 | [HeadlessTranscriptionEngine](src/main/java/com/knot/ai/transcription/infrastructure/HeadlessTranscriptionEngine.java) | 다운로드·오디오 변환·runner 실행과 정리 |
+| [AudioInspector](src/main/java/com/knot/ai/transcription/infrastructure/AudioInspector.java) | 컨테이너 길이와 PCM 형식·실제 길이 검사 |
+| [ProcessSupervisor](src/main/java/com/knot/ai/transcription/infrastructure/ProcessSupervisor.java) | Python supervisor 실행, 제한 시간·취소·소유 프로세스 정리 |
 | [S3AudioDownloader](src/main/java/com/knot/ai/transcription/infrastructure/S3AudioDownloader.java) | S3 URL 검증과 고정된 객체 다운로드 |
 | [serverPipeline.ts](runner/scripts/serverPipeline.ts) | 음량 정규화, 전사, 화자 분리, 발화 병합 |
 | [serverSupervisor.py](runner/scripts/serverSupervisor.py) | 부모 JVM 감시와 소유한 프로세스 그룹 정리 |
 
 API 입력·상태·제약은 [HTTP 계약](docs/http-contract.md), 코드 출처는 [소스 구성](docs/source-layout.md), 분리 시 확인한 범위는 [검증 기록](docs/verification.md)에 있습니다.
+
+컨벤션 정리의 변경 범위·검증·남은 계약은 [리뷰 안내](docs/convention-refactor.md)에 있습니다.
 
 ## 설치와 기본 검증
 
